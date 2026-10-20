@@ -35,6 +35,10 @@
     margin-bottom: 12px; padding-bottom: 9px;
     border-bottom: 1px solid rgba(90, 170, 230, .16);
   }
+  #panel-l .title::before {
+    content: '▍'; color: #ff2e88; margin-right: 4px;
+    text-shadow: 0 0 10px rgba(255, 46, 136, .8);
+  }
   #panel-l .row { display: flex; gap: 14px; margin: 3px 0; }
   #panel-l .k { width: 84px; color: rgba(120, 180, 220, .30); }
   #panel-l .v { color: rgba(170, 225, 255, .82); font-variant-numeric: tabular-nums; }
@@ -228,6 +232,18 @@
     background: #eaf8ff; opacity: 0;
     transition: opacity .55s ease-out;
   }
+
+  /* ── 系统日志 ── */
+  #log {
+    position: fixed; right: 44px; top: 130px; z-index: 4;
+    width: 262px; text-align: right; pointer-events: none; user-select: none;
+    font: 10px/1.75 ui-monospace, "Cascadia Mono", Consolas, "Microsoft YaHei", monospace;
+    letter-spacing: .04em; color: rgba(110, 175, 215, .26);
+  }
+  #log div { opacity: 0; transform: translateX(8px); animation: logIn .35s ease-out forwards; }
+  #log div:nth-child(1) { color: rgba(150, 235, 255, .82); }
+  #log div:nth-child(2) { color: rgba(120, 200, 240, .48); }
+  @keyframes logIn { to { opacity: 1; transform: translateX(0); } }
 </style>
 </head>
 <body>
@@ -249,6 +265,8 @@
   <div><span class="k">一回路压力</span> <span class="v">15.5 MPa</span></div>
   <div><span class="k">帧率</span> <span class="v" id="v-geom">—</span></div>
 </div>
+
+<div id="log"></div>
 
 <div class="hud" id="foot">
   <b>加压水冷反应堆 · RBMK 型</b><br>
@@ -1455,6 +1473,193 @@ grid.position.y = -3.72;
 grid.renderOrder = 1;
 scene.add(grid);
 
+/* ═══════════════════════════ 赛博层：数据环 / 全息扫描 / 数据流 ═══════════════════════════ */
+const cyber = new THREE.Group();
+scene.add(cyber);
+
+const CYAN = 0x5ee6ff;
+const MAGENTA = 0xff2e88;
+const VIOLET = 0x8a5cff;
+
+/* ── 刻度数据环：赤道面外圈的仪表盘 ── */
+const dataRings = [];
+
+function makeDataRing(radius, width, count, color, speed, y) {
+  const geo = new THREE.RingGeometry(radius, radius + width, 200, 1);
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime:  { value: 0 },
+      uColor: { value: new THREE.Color(color) },
+      uCount: { value: count },
+      uSpeed: { value: speed },
+    },
+    vertexShader: /* glsl */`
+      varying vec2 vP;
+      void main() {
+        vP = position.xy;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */`
+      uniform float uTime;
+      uniform vec3  uColor;
+      uniform float uCount;
+      uniform float uSpeed;
+      varying vec2 vP;
+
+      void main() {
+        float a = atan(vP.y, vP.x) / 6.2831853 + 0.5;
+        float u = fract((a + uTime * uSpeed) * uCount);
+        // 细刻度
+        float fine = smoothstep(0.52, 0.46, u) * smoothstep(0.0, 0.06, u);
+        // 每 10 格一个长刻度
+        float big = fract((a + uTime * uSpeed) * uCount * 0.1);
+        float major = smoothstep(0.52, 0.44, big) * smoothstep(0.0, 0.02, big);
+        float alpha = fine * 0.16 + major * 0.55;
+        gl_FragColor = vec4(uColor, alpha * 0.62);
+      }
+    `,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  });
+  const m = new THREE.Mesh(geo, mat);
+  m.rotation.x = -Math.PI / 2;
+  m.position.y = y;
+  cyber.add(m);
+  dataRings.push(m);
+  return m;
+}
+
+makeDataRing(3.52, 0.15, 120, CYAN, 0.010, 0.02);
+makeDataRing(3.94, 0.10, 60, MAGENTA, -0.016, 0.02);
+makeDataRing(4.36, 0.07, 32, VIOLET, 0.024, 0.02);
+
+/* ── 全息扫描面：上下扫过整个堆体的半透明网格盘 ── */
+const holoMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uPower: { value: 1 } },
+  vertexShader: /* glsl */`
+    varying vec2 vP;
+    varying vec3 vWorld;
+    void main() {
+      vP = position.xy;
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWorld = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform float uTime;
+    uniform float uPower;
+    varying vec2 vP;
+    varying vec3 vWorld;
+
+    void main() {
+      float r = length(vP);
+
+      // 同心环
+      float rings = fract(r * 3.2 - uTime * 0.35);
+      float ringLine = smoothstep(0.94, 1.0, rings) * 0.55;
+
+      // 放射线
+      float a = atan(vP.y, vP.x) / 6.2831853;
+      float spokes = fract(a * 36.0 + uTime * 0.05);
+      float spoke = smoothstep(0.93, 1.0, spokes) * 0.30;
+
+      // 边缘渐隐
+      float fadeR = smoothstep(6.0, 2.0, r) * smoothstep(0.0, 1.2, r);
+
+      vec3 col = mix(vec3(0.30, 0.90, 1.0), vec3(1.0, 0.18, 0.55), smoothstep(2.0, 5.5, r));
+      float alpha = (ringLine + spoke) * fadeR * 0.34 * uPower;
+
+      gl_FragColor = vec4(col, alpha);
+    }
+  `,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+});
+const holoScan = new THREE.Mesh(new THREE.CircleGeometry(6.0, 96), holoMat);
+holoScan.rotation.x = -Math.PI / 2;
+holoScan.renderOrder = 15;
+scene.add(holoScan);
+
+/* ── 数据流：沿赤道环奔跑的光点 ── */
+const FLOW_N = 420;
+let flow, flowMat;
+{
+  const ang = new Float32Array(FLOW_N);
+  const rad = new Float32Array(FLOW_N);
+  const spd = new Float32Array(FLOW_N);
+  const yy  = new Float32Array(FLOW_N);
+  const siz = new Float32Array(FLOW_N);
+  const mix = new Float32Array(FLOW_N);
+
+  for (let i = 0; i < FLOW_N; i++) {
+    ang[i] = Math.random() * Math.PI * 2;
+    rad[i] = 2.85 + Math.random() * 1.15;
+    spd[i] = 0.10 + Math.random() * 0.55;
+    yy[i]  = (Math.random() - 0.5) * 0.22;
+    siz[i] = 0.6 + Math.random() * 1.8;
+    mix[i] = Math.random();
+  }
+
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(FLOW_N * 3), 3));
+  g.setAttribute('aAng',  new THREE.BufferAttribute(ang, 1));
+  g.setAttribute('aRad',  new THREE.BufferAttribute(rad, 1));
+  g.setAttribute('aSpd',  new THREE.BufferAttribute(spd, 1));
+  g.setAttribute('aY',    new THREE.BufferAttribute(yy, 1));
+  g.setAttribute('aSize', new THREE.BufferAttribute(siz, 1));
+  g.setAttribute('aMix',  new THREE.BufferAttribute(mix, 1));
+
+  flowMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 }, uPR: { value: PR }, uPower: { value: 1 },
+      uC1: { value: new THREE.Color(CYAN) },
+      uC2: { value: new THREE.Color(MAGENTA) },
+    },
+    vertexShader: /* glsl */`
+      attribute float aAng;
+      attribute float aRad;
+      attribute float aSpd;
+      attribute float aY;
+      attribute float aSize;
+      attribute float aMix;
+      uniform float uTime;
+      uniform float uPR;
+      uniform vec3  uC1;
+      uniform vec3  uC2;
+      varying vec3  vCol;
+      varying float vA;
+
+      void main() {
+        float ang = aAng + uTime * aSpd;
+        vec3 p = vec3(cos(ang) * aRad, aY + sin(uTime * 1.6 + aAng * 5.0) * 0.06, sin(ang) * aRad);
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        gl_Position = projectionMatrix * mv;
+        gl_PointSize = clamp(aSize * uPR * (58.0 / max(-mv.z, 0.001)), 0.6, 10.0 * uPR);
+        vCol = mix(uC1, uC2, aMix * aMix);
+        vA = 0.45 + 0.55 * pow(abs(sin(uTime * 2.2 + aAng * 3.1)), 3.0);
+      }
+    `,
+    fragmentShader: /* glsl */`
+      uniform float uPower;
+      varying vec3  vCol;
+      varying float vA;
+      void main() {
+        vec2 uv = gl_PointCoord - 0.5;
+        float d = length(uv);
+        if (d > 0.5) discard;
+        gl_FragColor = vec4(vCol, smoothstep(0.5, 0.02, d) * vA * 0.55 * uPower);
+      }
+    `,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  });
+
+  flow = new THREE.Points(g, flowMat);
+  flow.frustumCulled = false;
+  flow.renderOrder = 14;
+  scene.add(flow);
+}
+
+
 /* ═══════════════════════════ 体积光柱 ═══════════════════════════
    一根从顶部打下来的光锥。真做体积散射要额外 RT，这里是几何版：
    圆柱侧面用 fresnel 让"正对相机"的地方最亮，边缘自然淡出。 */
@@ -1808,8 +2013,15 @@ const FXShader = {
       vec2 c  = uv - 0.5;
       float r2 = dot(c, c);
 
+      // ── glitch：偶发的横向切片位移 ──
+      float slice = floor(uv.y * 46.0);
+      float tick = floor(uTime * 11.0);
+      float g = hash(vec2(slice, tick));
+      float burst = step(0.972, hash(vec2(tick, 7.13)));
+      uv.x += (g - 0.5) * 0.045 * burst * step(0.55, g);
+
       // 色差：越靠边缘越散
-      float ab = uAberration * (0.30 + r2 * 2.6);
+      float ab = uAberration * (0.30 + r2 * 2.6) + burst * 0.004;
       vec3 col;
       col.r = texture2D(tDiffuse, uv + c * ab).r;
       col.g = texture2D(tDiffuse, uv).g;
@@ -1888,9 +2100,20 @@ const cEl = {
 };
 
 let toastTimer = 0;
+const logEl = document.getElementById('log');
+
+function pushLog(text) {
+  if (!logEl) return;
+  const d = document.createElement('div');
+  d.textContent = '› ' + text;
+  logEl.prepend(d);
+  while (logEl.children.length > 7) logEl.lastChild.remove();
+}
+
 function toast(text, ms = 1600) {
   el.toast.textContent = text;
   el.toast.style.opacity = '1';
+  pushLog(text);
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { el.toast.style.opacity = '0'; }, ms);
 }
@@ -2518,6 +2741,17 @@ function tick() {
     r.holder.rotation.y = Math.sin(t * 0.5 + r.phase) * 0.15;
   }
 
+  /* —— 赛博层：数据环 / 扫描面 / 数据流 —— */
+  for (const r of dataRings) r.material.uniforms.uTime.value = t;
+
+  const scanY = ((t * 0.85) % 7.2) - 3.6;
+  holoScan.position.y = scanY;
+  holoMat.uniforms.uTime.value = t;
+  holoMat.uniforms.uPower.value = (0.25 + p2 * 0.85) * (sim.dead ? 0.15 : 1);
+
+  flowMat.uniforms.uTime.value = t;
+  flowMat.uniforms.uPower.value = (0.25 + p2 * 0.85) * (sim.dead ? 0.18 : 1);
+
   /* —— 软管：Verlet 求解 + 重建几何 —— */
   for (const h of hoses) stepHose(h, dt, t);
 
@@ -2615,6 +2849,14 @@ function tick() {
 renderer.setAnimationLoop(tick);
 renderControl();
 renderCool();
+
+/* 开场日志 */
+setTimeout(() => {
+  pushLog('堆芯自检完成');
+  pushLog('冷却回路 · 04 路在线');
+  pushLog('控制棒 · 06 支就位');
+  pushLog('功率稳定 · 78 %');
+}, 900);
 
 /* —— 供自动化测试读取的真实相机状态 —— */
 window.__cam = () => ({ yaw, pitch, dist, dragging, hovered: hovered ? hovered.userData.pick : null });
