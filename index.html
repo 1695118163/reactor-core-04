@@ -1473,6 +1473,51 @@ grid.position.y = -3.72;
 grid.renderOrder = 1;
 scene.add(grid);
 
+/* ═══════════════════════════ 远景：厂房剪影 ═══════════════════════════ */
+{
+  const silhouette = new THREE.MeshPhysicalMaterial({
+    color: 0x060a12,
+    metalness: 0.25,
+    roughness: 0.85,
+    envMapIntensity: 0.12,
+  });
+
+  const pillarGeo = new THREE.CylinderGeometry(0.42, 0.62, 26, 8);
+  const beamGeo = new THREE.BoxGeometry(0.5, 0.5, 1);
+
+  for (let i = 0; i < 10; i++) {
+    const a = (i / 10) * Math.PI * 2 + 0.31;
+    const r = 24 + (i % 3) * 5.5;
+    const h = 18 + (i % 4) * 6;
+
+    const p = new THREE.Mesh(pillarGeo, silhouette);
+    p.scale.y = h / 26;
+    p.position.set(Math.cos(a) * r, -3.6 + h / 2, Math.sin(a) * r);
+    scene.add(p);
+
+    // 横梁：从柱子向内侧伸出一段
+    const b = new THREE.Mesh(beamGeo, silhouette);
+    b.scale.z = 4 + (i % 3) * 2.5;
+    b.position.set(Math.cos(a) * (r - 2.2), -3.6 + h * 0.72, Math.sin(a) * (r - 2.2));
+    b.lookAt(0, -3.6 + h * 0.72, 0);
+    scene.add(b);
+  }
+
+  // 远处管道：一圈横跨的细长管
+  for (let i = 0; i < 3; i++) {
+    const y = 2.5 + i * 3.2;
+    const r = 21 + i * 3;
+    const tube = new THREE.Mesh(
+      new THREE.TorusGeometry(r, 0.12, 6, 96),
+      silhouette
+    );
+    tube.rotation.x = Math.PI / 2;
+    tube.position.y = y;
+    scene.add(tube);
+  }
+}
+
+
 /* ═══════════════════════════ 赛博层：数据环 / 全息扫描 / 数据流 ═══════════════════════════ */
 const cyber = new THREE.Group();
 scene.add(cyber);
@@ -1695,19 +1740,58 @@ const shaftMat = new THREE.ShaderMaterial({
         + 0.14 * sin(vUv.x * 34.0 + uTime * 0.32)
         + 0.08 * sin(vUv.x * 11.0 - uTime * 0.19 + vUv.y * 5.0);
 
-      float a = core * vert * bands * 0.065 * uPower;
+      float a = core * vert * bands * 0.078 * uPower;
       gl_FragColor = vec4(vec3(0.38, 0.74, 1.0), a);
     }
   `,
   transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
 });
+const LAMP_Y = 8.4;
+
 const shaft = new THREE.Mesh(
-  new THREE.CylinderGeometry(2.15, 4.05, 8.9, 64, 1, true),
+  new THREE.CylinderGeometry(1.28, 3.60, 12.0, 72, 1, true),
   shaftMat
 );
-shaft.position.y = 0.75;
+shaft.position.y = 2.4;
 shaft.renderOrder = 21;
 scene.add(shaft);
+
+/* ── 顶部灯具：光锥的来源，得看得见 ── */
+{
+  const lampMat = new THREE.MeshBasicMaterial({
+    color: 0xcaf3ff, transparent: true, opacity: 0.95,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(1.34, 0.055, 10, 72), lampMat);
+  ring.rotation.x = Math.PI / 2;
+  ring.position.y = LAMP_Y;
+  scene.add(ring);
+
+  const ring2 = new THREE.Mesh(new THREE.TorusGeometry(1.72, 0.03, 8, 72), lampMat.clone());
+  ring2.material.opacity = 0.5;
+  ring2.rotation.x = Math.PI / 2;
+  ring2.position.y = LAMP_Y + 0.22;
+  scene.add(ring2);
+
+  // 灯环上的六枚灯珠
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2;
+    const b = new THREE.Mesh(new THREE.SphereGeometry(0.075, 10, 8), lampMat.clone());
+    b.position.set(Math.cos(a) * 1.34, LAMP_Y, Math.sin(a) * 1.34);
+    scene.add(b);
+  }
+
+  // 吊挂结构：三根细杆把灯环吊在上方
+  const hangMat = new THREE.MeshPhysicalMaterial({
+    color: 0x1a232f, metalness: 0.7, roughness: 0.45, envMapIntensity: 0.5,
+  });
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * Math.PI * 2 + 0.4;
+    const h = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 7.0, 6), hangMat);
+    h.position.set(Math.cos(a) * 1.34, LAMP_Y + 3.5, Math.sin(a) * 1.34);
+    scene.add(h);
+  }
+}
 
 /* ═══════════════════════════ 光里的浮尘 ═══════════════════════════ */
 const DUST_N = 1100;
@@ -2068,7 +2152,10 @@ const sim = {
   spike: 0,           // 功率尖峰（石墨头正空泡）
   shake: 0,
   dead: false,
+  critT: 0,           // 失控倒计时：>0 表示已越过阈值，正在烧穿
 };
+
+const MELTDOWN_TIME = 5.5;   // 越线之后还能抢救的秒数
 
 const el = {
   state: document.getElementById('v-state'),
@@ -2243,6 +2330,7 @@ function restart() {
   sim.coolCd = 0;
   sim.spike = 0;
   sim.shake = 0;
+  sim.critT = 0;
   state.heat = 0;
 
   // 清掉碎屑，恢复结构
@@ -2597,9 +2685,12 @@ function tick() {
   camera.position.set(Math.sin(yaw) * rr, yy, Math.cos(yaw) * rr);
   camera.lookAt(0, 0.15, 0);
 
-  /* —— 震动：脉冲 + 熔毁 —— */
+  /* —— 震动：脉冲 + 熔毁 + 临界倒计时 —— */
   sim.shake *= Math.pow(0.14, dt);
-  const shakeAmt = state.pulse * state.pulse * 0.075 + Math.min(sim.shake, 2.2) * 0.16;
+  const critRatio = sim.critT > 0 ? (MELTDOWN_TIME - sim.critT) / MELTDOWN_TIME : 0;
+  const shakeAmt = state.pulse * state.pulse * 0.075
+                 + Math.min(sim.shake, 2.2) * 0.16
+                 + critRatio * critRatio * 0.13;
   if (shakeAmt > 0.0015) {
     camera.position.x += (Math.random() - 0.5) * shakeAmt;
     camera.position.y += (Math.random() - 0.5) * shakeAmt;
@@ -2643,8 +2734,23 @@ function tick() {
     if (sim.power > 1.0) heatIn += (sim.power - 1.0) * 1.6;   // 超功率额外发热
     const rodCool = (state.rodsIn / ROD_N) * 0.10;
     const coolOut = 0.09 + sim.temp * 0.60 + rodCool + (sim.coolT > 0 ? 0.55 : 0);
-    sim.temp = THREE.MathUtils.clamp(sim.temp + (heatIn - coolOut) * dt, 0, 1.5);
-    if (sim.temp >= 1.0) explode();
+    sim.temp = THREE.MathUtils.clamp(sim.temp + (heatIn - coolOut) * dt, 0, 1.6);
+
+    // —— 越过阈值不是立刻炸，是开始烧穿：给 5.5 秒抢救窗口 ——
+    if (sim.critT > 0) {
+      sim.critT -= dt;
+      // 温度降回安全线，险情解除
+      if (sim.temp < 0.80) {
+        sim.critT = 0;
+        toast('温度回落 · 险情解除', 2600);
+      } else if (sim.critT <= 0) {
+        explode();
+      }
+    } else if (sim.temp >= 1.0) {
+      sim.critT = MELTDOWN_TIME;
+      sim.shake = Math.max(sim.shake, 0.6);
+      toast('堆芯失控 · 5 秒内若无降温将熔毁', 3800);
+    }
   }
 
   // 冷却剂补给
@@ -2803,10 +2909,11 @@ function tick() {
 
   /* —— 后处理 —— */
   const heatGlow = Math.max(0, state.heat - 0.6) * 0.8;
-  bloom.strength = 0.30 + 0.45 * (0.25 + p2 * 0.85) + heatGlow * 0.5;
+  bloom.strength = 0.30 + 0.45 * (0.25 + p2 * 0.85) + heatGlow * 0.5 + critRatio * 0.55;
   bloom.threshold = Math.max(0.40, 0.74 - Math.max(0, state.heat - 0.65) * 0.45);
   fxPass.uniforms.uTime.value = t;
-  fxPass.uniforms.uAberration.value = 0.0022 + Math.max(0, state.heat - 0.6) * 0.010;
+  fxPass.uniforms.uAberration.value =
+    0.0022 + Math.max(0, state.heat - 0.6) * 0.010 + critRatio * 0.014;
 
   /* —— HUD（10Hz 足够，别每帧动 DOM） —— */
   if (t - hudT > 0.1) {
@@ -2814,6 +2921,15 @@ function tick() {
     const outPct = Math.max(0, sim.power * 100 + Math.sin(t * 3.1) * 0.5);
     el.out.textContent = outPct.toFixed(1) + ' %';
     el.out.className = 'v' + (outPct < 40 ? ' bad' : outPct < 85 ? ' warn' : '');
+
+    // 失控倒计时优先占用状态位
+    if (sim.critT > 0) {
+      el.state.textContent = '失控 ' + sim.critT.toFixed(1) + 's';
+      el.state.className = 'v bad';
+    } else if (state.mode === 'online') {
+      el.state.textContent = '运行中';
+      el.state.className = 'v';
+    }
 
     const tempK = Math.round(320 + sim.temp * 3300);
     el.temp.textContent = tempK + ' K';
