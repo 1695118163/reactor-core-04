@@ -1,0 +1,2635 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>reactor · core-04</title>
+<style>
+  :root { color-scheme: dark; --ink: rgba(150, 205, 245, .40); --ink-hi: rgba(196, 238, 255, .92); }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #01030a; }
+  canvas { display: block; cursor: default; }
+  canvas.hot { cursor: pointer; }
+  canvas.dragging { cursor: grabbing; }
+
+  /* ── 取景框 ── */
+  #frame {
+    position: fixed; inset: 20px; z-index: 3; pointer-events: none;
+    border: 1px solid rgba(80, 160, 225, .10);
+  }
+  #frame::before, #frame::after {
+    content: ''; position: absolute; width: 22px; height: 22px;
+    border: 1px solid rgba(120, 200, 255, .38);
+  }
+  #frame::before { left: -1px; top: -1px; border-right: 0; border-bottom: 0; }
+  #frame::after  { right: -1px; bottom: -1px; border-left: 0; border-top: 0; }
+
+  /* ── HUD ── */
+  .hud {
+    position: fixed; z-index: 4; pointer-events: none; user-select: none;
+    font: 11px/1.75 ui-monospace, "Cascadia Mono", Consolas, "Microsoft YaHei", "PingFang SC", monospace;
+    letter-spacing: .08em; color: var(--ink);
+  }
+  #panel-l { left: 44px; top: 42px; }
+  #panel-l .title {
+    font-size: 12px; letter-spacing: .18em; color: var(--ink-hi);
+    margin-bottom: 12px; padding-bottom: 9px;
+    border-bottom: 1px solid rgba(90, 170, 230, .16);
+  }
+  #panel-l .row { display: flex; gap: 14px; margin: 3px 0; }
+  #panel-l .k { width: 84px; color: rgba(120, 180, 220, .30); }
+  #panel-l .v { color: rgba(170, 225, 255, .82); font-variant-numeric: tabular-nums; }
+  #panel-l .v.warn { color: #ffb35c; }
+  #panel-l .v.bad  { color: #ff5f7a; }
+
+  #panel-r { right: 44px; top: 42px; text-align: right; }
+  #panel-r .k { color: rgba(120, 180, 220, .28); }
+  #panel-r .v { color: rgba(170, 225, 255, .78); font-variant-numeric: tabular-nums; }
+
+  #foot {
+    left: 44px; bottom: 40px; letter-spacing: .1em;
+    color: rgba(120, 180, 220, .26);
+    display: none;
+  }
+  #foot b { color: rgba(180, 232, 255, .72); font-weight: 500; }
+
+  #keys {
+    right: 44px; bottom: 40px; text-align: right; line-height: 1.85;
+    color: rgba(120, 180, 220, .24);
+  }
+  #keys b { color: rgba(170, 220, 250, .58); font-weight: 500; }
+  #keys .sep { color: rgba(90, 140, 180, .22); margin: 0 8px; }
+
+  /* ── 状态灯 ── */
+  #lamp {
+    position: fixed; left: 44px; top: 42px; z-index: 5;
+    width: 5px; height: 5px; margin-left: -16px; margin-top: 4px;
+    border-radius: 50%; background: #6ff0c0;
+    box-shadow: 0 0 10px 2px rgba(110, 240, 190, .55);
+    transition: background .4s, box-shadow .4s;
+  }
+  #lamp.scram { background: #ff5f7a; box-shadow: 0 0 10px 2px rgba(255, 95, 122, .6); }
+  #lamp.busy  { background: #ffc46b; box-shadow: 0 0 10px 2px rgba(255, 196, 107, .6); }
+
+  /* ── 底部扫描线（纯 CSS，叠在 canvas 之上） ── */
+  #scanlines {
+    position: fixed; inset: 0; z-index: 2; pointer-events: none; opacity: .35;
+    background: repeating-linear-gradient(
+      to bottom,
+      rgba(120, 200, 255, .030) 0px,
+      rgba(120, 200, 255, .030) 1px,
+      rgba(0, 0, 0, 0) 1px,
+      rgba(0, 0, 0, 0) 3px
+    );
+  }
+  #toast {
+    position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%);
+    z-index: 6; pointer-events: none; opacity: 0;
+    font: 11px ui-monospace, Consolas, monospace; letter-spacing: .22em;
+    text-transform: uppercase; color: rgba(190, 235, 255, .9);
+    text-shadow: 0 0 16px rgba(90, 190, 255, .8);
+    transition: opacity .35s;
+  }
+  #tip {
+    position: fixed; left: 0; top: 0; z-index: 7; pointer-events: none;
+    opacity: 0; padding: 5px 9px;
+    border-left: 1px solid rgba(120, 200, 255, .55);
+    background: rgba(4, 13, 24, .74);
+    font: 10px/1.6 ui-monospace, Consolas, monospace;
+    letter-spacing: .16em; text-transform: uppercase;
+    color: rgba(185, 238, 255, .92); white-space: nowrap;
+    transition: opacity .16s;
+  }
+  #tip b { color: #fff; font-weight: 500; }
+
+  /* ── 操作说明面板 ── */
+  #help {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%) scale(.98);
+    z-index: 9; width: min(560px, calc(100vw - 80px));
+    padding: 26px 30px 22px;
+    background: rgba(4, 12, 22, .88);
+    border: 1px solid rgba(90, 175, 235, .22);
+    box-shadow: 0 0 60px rgba(20, 90, 180, .28), inset 0 0 40px rgba(10, 40, 80, .35);
+    backdrop-filter: blur(6px);
+    font: 12px/1.9 ui-monospace, "Cascadia Mono", Consolas, "Microsoft YaHei", monospace;
+    color: rgba(165, 215, 245, .80);
+    opacity: 0; pointer-events: none;
+    transition: opacity .25s, transform .25s;
+  }
+  #help.on { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  #help h3 {
+    margin: 0 0 16px; padding-bottom: 12px;
+    font-size: 13px; font-weight: 500; letter-spacing: .2em;
+    color: rgba(200, 240, 255, .95);
+    border-bottom: 1px solid rgba(90, 175, 235, .18);
+  }
+  #help dl { margin: 0; display: grid; grid-template-columns: 132px 1fr; gap: 9px 18px; }
+  #help dt { color: rgba(150, 225, 255, .92); font-weight: 500; }
+  #help dd { margin: 0; color: rgba(150, 195, 225, .62); }
+  #help .note {
+    margin: 18px 0 0; padding-top: 12px; font-size: 11px;
+    color: rgba(120, 170, 205, .38);
+    border-top: 1px solid rgba(90, 175, 235, .12);
+  }
+  #hinthelp {
+    position: fixed; left: 50%; bottom: 34px; transform: translateX(-50%);
+    z-index: 5; pointer-events: none; opacity: 0;
+    font: 11px ui-monospace, Consolas, "Microsoft YaHei", monospace;
+    letter-spacing: .12em; color: rgba(140, 205, 245, .55);
+    transition: opacity .6s;
+  }
+
+  /* ── 功率控制面板 ── */
+  #control {
+    position: fixed; left: 44px; bottom: 92px; z-index: 5;
+    width: 268px; padding: 16px 18px 14px;
+    background: rgba(4, 12, 22, .55);
+    border: 1px solid rgba(90, 175, 235, .16);
+    border-left: 2px solid rgba(110, 200, 255, .42);
+    font: 11px/1.6 ui-monospace, "Cascadia Mono", Consolas, "Microsoft YaHei", monospace;
+    color: rgba(150, 200, 235, .55);
+    user-select: none;
+  }
+  #control .tier {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 9px;
+  }
+  #control .tier .name { color: rgba(170, 230, 255, .95); letter-spacing: .14em; font-size: 12px; }
+  #control .tier .val { color: #fff; font-variant-numeric: tabular-nums; font-size: 13px; }
+
+  #track {
+    position: relative; height: 16px; margin: 4px 0 12px;
+    cursor: pointer;
+  }
+  #track .rail {
+    position: absolute; left: 0; right: 0; top: 6px; height: 3px;
+    background: rgba(80, 140, 190, .18);
+  }
+  #track .zones { position: absolute; inset: 0; }
+  #track .zone {
+    position: absolute; top: 6px; height: 3px;
+  }
+  #track .zone.low  { background: rgba(90, 200, 255, .40); }
+  #track .zone.norm { background: rgba(110, 235, 200, .45); }
+  #track .zone.high { background: rgba(255, 190, 90, .55); }
+  #track .zone.max  { background: rgba(255, 90, 110, .62); }
+
+  #track .fill {
+    position: absolute; left: 0; top: 4px; height: 7px;
+    background: linear-gradient(90deg, rgba(90,200,255,.55), rgba(190,245,255,.9));
+    box-shadow: 0 0 12px rgba(120, 210, 255, .55);
+    pointer-events: none;
+  }
+  #track .knob {
+    position: absolute; top: 1px; width: 10px; height: 14px; margin-left: -5px;
+    background: #dff6ff; box-shadow: 0 0 12px rgba(150, 225, 255, .95);
+    pointer-events: none;
+  }
+  #track:hover .knob { background: #fff; }
+
+  #control .rowline {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-top: 7px;
+  }
+  #control .bar {
+    flex: 1; height: 6px; margin: 0 10px;
+    background: rgba(80, 140, 190, .16); position: relative; overflow: hidden;
+  }
+  #tempfill {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 42%;
+    background: linear-gradient(90deg, #57c8ff, #9ef0ff);
+    transition: background .25s;
+  }
+  #tempfill.warn { background: linear-gradient(90deg, #ffb347, #ffd88a); }
+  #tempfill.bad  { background: linear-gradient(90deg, #ff4d63, #ff8a9b); }
+
+  #coolDots { letter-spacing: 3px; color: rgba(120, 200, 255, .85); }
+  #coolDots i { font-style: normal; color: rgba(80, 130, 170, .30); }
+
+  #coolBtn {
+    margin-top: 11px; padding: 6px 0; text-align: center; cursor: pointer;
+    border: 1px solid rgba(90, 190, 255, .35);
+    color: rgba(180, 235, 255, .9); letter-spacing: .18em;
+    background: rgba(20, 60, 100, .30);
+    transition: background .18s, border-color .18s;
+  }
+  #coolBtn:hover { background: rgba(30, 90, 150, .45); border-color: rgba(120, 215, 255, .6); }
+  #coolBtn.dead { opacity: .32; cursor: default; }
+
+  #alarm {
+    position: fixed; inset: 0; z-index: 8; pointer-events: none; opacity: 0;
+    background: radial-gradient(120% 90% at 50% 50%, rgba(255,40,60,0) 40%, rgba(255,30,50,.30) 100%);
+    transition: opacity .3s;
+  }
+  #alarm.on { opacity: 1; animation: alarmPulse 1.1s ease-in-out infinite; }
+  @keyframes alarmPulse { 0%,100% { opacity: .45; } 50% { opacity: 1; } }
+
+  #flash {
+    position: fixed; inset: 0; z-index: 12; pointer-events: none;
+    background: #eaf8ff; opacity: 0;
+    transition: opacity .55s ease-out;
+  }
+</style>
+</head>
+<body>
+<div id="scanlines"></div>
+<div id="frame"></div>
+
+<div id="lamp"></div>
+<div class="hud" id="panel-l">
+  <div class="title">反应堆 · 核心 04</div>
+  <div class="row"><span class="k">运行状态</span><span class="v" id="v-state">运行中</span></div>
+  <div class="row"><span class="k">输出功率</span><span class="v" id="v-out">100.0 %</span></div>
+  <div class="row"><span class="k">堆芯温度</span><span class="v" id="v-temp">3178 K</span></div>
+  <div class="row"><span class="k">中子通量</span><span class="v" id="v-flux">2.09e14</span></div>
+  <div class="row"><span class="k">控制棒</span><span class="v" id="v-rods">0.0 / 6 插入</span></div>
+</div>
+
+<div class="hud" id="panel-r">
+  <div><span class="k">冷却剂流速</span> <span class="v" id="v-cool">4.2 m/s</span></div>
+  <div><span class="k">一回路压力</span> <span class="v">15.5 MPa</span></div>
+  <div><span class="k">帧率</span> <span class="v" id="v-geom">—</span></div>
+</div>
+
+<div class="hud" id="foot">
+  <b>加压水冷反应堆 · RBMK 型</b><br>
+  切伦科夫辐射 · 实时
+</div>
+
+<div class="hud" id="keys">
+  <b>右键按住拖动</b><span class="sep">·</span>环绕视角<br>
+  <b>滚轮</b><span class="sep">·</span>推拉远近<br>
+  <b>左键点核心</b><span class="sep">·</span>中子脉冲<br>
+  <b>左键点控制棒</b><span class="sep">·</span>插拔该棒<br>
+  <b>空格</b><span class="sep">·</span>停堆 / 启堆<br>
+  <b>R</b><span class="sep">·</span>重置视角<span class="sep">·</span><b>H</b> 说明<span class="sep">·</span><b>M</b> 静音
+</div>
+
+<div id="hinthelp">按 H 查看完整操作说明</div>
+
+<div id="alarm"></div>
+<div id="flash"></div>
+
+<div id="control">
+  <div class="tier">
+    <span class="name" id="tierName">正常功率</span>
+    <span class="val" id="powerVal">100%</span>
+  </div>
+
+  <div id="track">
+    <div class="rail"></div>
+    <div class="zones">
+      <div class="zone low"  style="left:0%;    width:27.27%"></div>
+      <div class="zone norm" style="left:27.27%;width:36.37%"></div>
+      <div class="zone high" style="left:63.64%;width:20.00%"></div>
+      <div class="zone max"  style="left:83.64%;width:16.36%"></div>
+    </div>
+    <div class="fill" id="powerFill"></div>
+    <div class="knob" id="powerKnob"></div>
+  </div>
+
+  <div class="rowline">
+    <span>堆芯温度</span>
+    <div class="bar"><div id="tempfill"></div></div>
+    <span id="tempVal">42%</span>
+  </div>
+
+  <div class="rowline">
+    <span>冷却剂</span>
+    <span id="coolDots"><i>●</i><i>●</i><i>●</i></span>
+    <span>按 C 注水</span>
+  </div>
+
+  <div id="coolBtn">注 水 · 降 温</div>
+</div>
+
+<div id="help">
+  <h3>操作说明</h3>
+  <dl>
+    <dt>右键按住拖动</dt><dd>环绕旋转视角，松手后带一点惯性滑行</dd>
+    <dt>普通移动鼠标</dt><dd>不会转动视角，只会让可交互部件亮起来并浮出标签</dd>
+    <dt>滚轮</dt><dd>推拉镜头，5.2 ~ 18.5 之间</dd>
+    <dt>拖动功率条</dt><dd>设定目标功率。低 / 正常 / 高 / 极限四档，越往上温度爬得越快</dd>
+    <dt>按 C 注水</dt><dd>注入冷却剂快速降温。共 3 次，用完每 11 秒补给一次</dd>
+    <dt>温度 &gt; 80%</dt><dd>屏幕边缘开始闪红。此时插入控制棒会引发石墨头正空泡反馈 —— 直接熔毁</dd>
+    <dt>左键点堆芯</dt><dd>触发一次中子脉冲：闪爆、相机震动、冲击环扩散</dd>
+    <dt>左键点控制棒</dt><dd>该控制棒插入或抽出，功率与流速实时变化</dd>
+    <dt>空格</dt><dd>紧急停堆（SCRAM）；停堆状态下再按一次重新启堆</dd>
+    <dt>R</dt><dd>重置视角；熔毁之后按 R 重启反应堆</dd>
+    <dt>H</dt><dd>打开 / 关闭这张说明</dd>
+    <dt>M</dt><dd>静音 / 恢复声音</dd>
+  </dl>
+  <p class="note">静止 3 秒以上，镜头会开始极慢自转；任何操作都会立刻停下。</p>
+</div>
+
+<div id="toast"></div>
+<div id="tip"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer }  from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass }      from 'three/addons/postprocessing/RenderPass.js';
+import { ShaderPass }      from 'three/addons/postprocessing/ShaderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass }      from 'three/addons/postprocessing/OutputPass.js';
+
+/* ═══════════════════════════ 基础 ═══════════════════════════ */
+const W = () => window.innerWidth;
+const H = () => window.innerHeight;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(W(), H());
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+document.body.appendChild(renderer.domElement);
+const canvas = renderer.domElement;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x01030a);
+scene.fog = new THREE.FogExp2(0x02060f, 0.0085);
+
+const camera = new THREE.PerspectiveCamera(44, W() / H(), 0.1, 260);
+const clock = new THREE.Clock();
+const PR = Math.min(window.devicePixelRatio, 2);
+
+/* ═══════════════════════════ 程序化环境贴图 ═══════════════════════════
+   没有 envMap 的金属只剩一颗高光，是死黑剪影。
+   这里现场烘一张：几个蓝白色发光板 + 渐变穹顶，PMREM 预滤波后给全场景用。 */
+function buildEnvironment() {
+  const s = new THREE.Scene();
+
+  const dome = new THREE.Mesh(
+    new THREE.SphereGeometry(20, 32, 24),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(0.006, 0.016, 0.038), side: THREE.BackSide })
+  );
+  s.add(dome);
+
+  const panel = (x, y, z, w, h, color, power) => {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(color[0], color[1], color[2]).multiplyScalar(power), side: THREE.DoubleSide })
+    );
+    m.position.set(x, y, z);
+    m.lookAt(0, 0, 0);
+    s.add(m);
+  };
+
+  // 头顶冷白长灯（细长条 → 金属上反出细亮线，比大面积光晕高级）
+  panel(0, 9, 2, 16, 0.35, [0.55, 0.82, 1.0], 4.5);
+  // 左右两条竖直细光
+  panel(-11, 2, 3, 0.60, 3.0, [0.22, 0.48, 1.0], 3.0);
+  panel(11, 2, -3, 0.60, 3.0, [0.30, 0.62, 1.0], 2.4);
+  // 正前方的核心反光
+  panel(0, 1, 11, 5.0, 0.50, [0.42, 0.78, 1.0], 2.6);
+  // 地面的一点反射
+  panel(0, -9, 0, 18, 18, [0.05, 0.13, 0.26], 0.8);
+
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const rt = pmrem.fromScene(s, 0.035);
+  pmrem.dispose();
+
+  s.traverse((o) => {
+    if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
+  });
+  return rt.texture;
+}
+const envTex = buildEnvironment();
+scene.environment = envTex;
+
+/* ═══════════════════════════ 深空穹顶 ═══════════════════════════ */
+const domeMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: /* glsl */`
+    varying vec3 vP;
+    void main() {
+      vP = position;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform float uTime;
+    varying vec3 vP;
+    void main() {
+      vec3 d = normalize(vP);
+      float h = d.y * 0.5 + 0.5;
+      vec3 top = vec3(0.007, 0.020, 0.048);
+      vec3 mid = vec3(0.003, 0.008, 0.020);
+      vec3 bot = vec3(0.001, 0.002, 0.006);
+      vec3 col = h > 0.5 ? mix(mid, top, (h - 0.5) * 2.0) : mix(bot, mid, h * 2.0);
+
+      float neb = sin(d.x * 3.1 + uTime * 0.02)
+                * sin(d.z * 2.4 - uTime * 0.017)
+                * sin(d.y * 1.6 + 0.7);
+      col += vec3(0.008, 0.026, 0.055) * max(neb, 0.0);
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+  side: THREE.BackSide, depthWrite: false, fog: false,
+});
+const dome = new THREE.Mesh(new THREE.SphereGeometry(150, 40, 28), domeMat);
+dome.renderOrder = -1;
+scene.add(dome);
+
+/* ═══════════════════════════ 灯光 ═══════════════════════════ */
+const coreLight = new THREE.PointLight(0x52c4ff, 160, 46, 2.0);
+scene.add(coreLight);
+
+const underLight = new THREE.PointLight(0x1f5cff, 34, 26, 2.0);
+underLight.position.set(0, -2.6, 0);
+scene.add(underLight);
+
+const topLight = new THREE.PointLight(0xa8ecff, 16, 16, 2.0);
+topLight.position.set(0, 4.2, 0);
+scene.add(topLight);
+
+scene.add(new THREE.AmbientLight(0x0a1a2e, 1.2));
+
+/* ═══════════════════════════ 径向渐变纹理 ═══════════════════════════ */
+function radialTexture(stops, size = 512) {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = size;
+  const ctx = cv.getContext('2d');
+  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  stops.forEach(([p, c]) => g.addColorStop(p, c));
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const t = new THREE.CanvasTexture(cv);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+/* ═══════════════════════════ 内核 ═══════════════════════════ */
+const CORE_R = 1.52;
+
+const coreMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPower: { value: 1 },
+    uHeat: { value: 0 },
+    uDeep: { value: new THREE.Color(0x07205e) },
+    uHot:  { value: new THREE.Color(0x5ed6ff) },
+  },
+  vertexShader: /* glsl */`
+    varying vec3 vN;
+    varying vec3 vV;
+    varying vec3 vP;
+    void main() {
+      vP = position;
+      vN = normalize(normalMatrix * normal);
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vV = -mv.xyz;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform float uTime;
+    uniform float uPower;
+    uniform float uHeat;
+    uniform vec3  uDeep;
+    uniform vec3  uHot;
+    varying vec3 vN;
+    varying vec3 vV;
+    varying vec3 vP;
+
+    void main() {
+      vec3 n = normalize(vP);
+
+      float w1 = sin(n.y * 5.0 + uTime * 1.55) * sin(n.x * 4.0 - uTime * 1.15);
+      float w2 = sin(n.z * 8.0 + uTime * 2.10) * sin(n.y * 6.0 + uTime * 0.95);
+      float w3 = sin((n.x + n.z) * 3.0 - uTime * 0.70);
+      float flow = clamp((w1 * 0.5 + w2 * 0.32 + w3 * 0.18) * 0.5 + 0.5, 0.0, 1.0);
+
+      float f = pow(1.0 - abs(dot(normalize(vN), normalize(vV))), 2.1);
+
+      // 温度越高，等离子体越白、越橙 —— 黑体辐射的方向
+      vec3 hot = mix(uHot, vec3(1.0, 0.44, 0.18), clamp((uHeat - 0.55) * 2.6, 0.0, 0.88));
+
+      float k = clamp(f * 1.10 + flow * 0.30, 0.0, 1.0);
+      vec3 col = mix(uDeep * 0.55, hot, k);
+      col += hot * flow * 0.18;
+
+      gl_FragColor = vec4(col * (0.22 + k * 0.95) * uPower, (0.35 + f * 0.55) * uPower);
+    }
+  `,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+});
+const core = new THREE.Mesh(new THREE.IcosahedronGeometry(CORE_R, 5), coreMat);
+core.renderOrder = 3;
+core.userData.pick = 'core';
+scene.add(core);
+
+const membraneMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uPower: { value: 1 } },
+  vertexShader: /* glsl */`
+    varying vec3 vN;
+    varying vec3 vV;
+    void main() {
+      vN = normalize(normalMatrix * normal);
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vV = -mv.xyz;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform float uTime;
+    uniform float uPower;
+    varying vec3 vN;
+    varying vec3 vV;
+    void main() {
+      float f = 1.0 - abs(dot(normalize(vN), normalize(vV)));
+      float p = pow(f, 3.4);
+      float shimmer = 0.72 + 0.28 * sin(uTime * 2.6);
+      gl_FragColor = vec4(vec3(0.22, 0.62, 1.0) * p * 0.42, p * 0.30 * shimmer * uPower);
+    }
+  `,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+});
+const membrane = new THREE.Mesh(new THREE.IcosahedronGeometry(CORE_R * 1.10, 4), membraneMat);
+membrane.renderOrder = 4;
+scene.add(membrane);
+
+const heartMat = new THREE.SpriteMaterial({
+  map: radialTexture([
+    [0.00, 'rgba(205,247,255,0.95)'],
+    [0.10, 'rgba(120,205,255,0.60)'],
+    [0.30, 'rgba(52,140,255,0.25)'],
+    [0.58, 'rgba(16,58,170,0.07)'],
+    [1.00, 'rgba(0,0,0,0)'],
+  ]),
+  blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, opacity: 0.80,
+});
+const heart = new THREE.Sprite(heartMat);
+heart.scale.setScalar(2.45);
+heart.renderOrder = 6;
+scene.add(heart);
+
+const sparkMat = new THREE.SpriteMaterial({
+  map: radialTexture([
+    [0.00, 'rgba(255,255,255,1.00)'],
+    [0.30, 'rgba(205,242,255,0.92)'],
+    [0.62, 'rgba(120,205,255,0.30)'],
+    [1.00, 'rgba(80,180,255,0)'],
+  ], 256),
+  blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, opacity: 0.95,
+});
+const spark = new THREE.Sprite(sparkMat);
+spark.scale.setScalar(1.55);
+spark.renderOrder = 7;
+scene.add(spark);
+
+/* ═══════════════════════════ 压力容器外壳 ═══════════════════════════ */
+const SHELL_R = 2.62;
+
+const shellMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uScan: { value: 0 }, uPower: { value: 1 } },
+  vertexShader: /* glsl */`
+    varying vec3 vN;
+    varying vec3 vV;
+    varying vec3 vP;
+    void main() {
+      vP = position;
+      vN = normalize(normalMatrix * normal);
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vV = -mv.xyz;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform float uTime;
+    uniform float uScan;
+    uniform float uPower;
+    varying vec3 vN;
+    varying vec3 vV;
+    varying vec3 vP;
+    void main() {
+      float fres = pow(1.0 - abs(dot(normalize(vN), normalize(vV))), 3.0);
+
+      vec3 s = normalize(vP);
+      float band = smoothstep(0.05, 0.0, abs(s.y - uScan));
+
+      float lon = fract(atan(s.z, s.x) / 6.2831853 * 36.0 + 0.5);
+      float lat = fract(asin(clamp(s.y, -1.0, 1.0)) / 3.1415926 * 18.0 + 0.5);
+      float grid = max(
+        1.0 - smoothstep(0.0, 0.035, min(lon, 1.0 - lon)),
+        1.0 - smoothstep(0.0, 0.035, min(lat, 1.0 - lat))
+      );
+
+      vec3 col = vec3(0.24, 0.62, 1.0) * fres * 0.78
+               + vec3(0.55, 0.90, 1.0) * band * 0.30
+               + vec3(0.18, 0.48, 0.92) * grid * 0.048;
+
+      float a = fres * 0.38 + band * 0.28 + grid * 0.030;
+
+      // 环境灯在玻璃上的锐利反射——没有这道高光，球就只是一层雾
+      vec3 N = normalize(vN);
+      vec3 V = normalize(vV);
+      vec3 L1 = normalize(vec3(0.18, 0.97, 0.20));
+      vec3 H1 = normalize(L1 + V);
+      float spec = pow(max(dot(N, H1), 0.0), 150.0);
+      col += vec3(0.62, 0.88, 1.0) * spec * 0.85;
+      a   += spec * 0.30;
+
+      gl_FragColor = vec4(col * uPower, min(a, 1.0));
+    }
+  `,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+});
+const shell = new THREE.Mesh(new THREE.SphereGeometry(SHELL_R, 96, 64), shellMat);
+shell.renderOrder = 10;
+scene.add(shell);
+
+/* ═══════════════════════════ 球内粒子云 ═══════════════════════════ */
+const CLOUD_N = 9000;
+const cloudGeo = new THREE.BufferGeometry();
+{
+  const dir = new Float32Array(CLOUD_N * 3);
+  const rad = new Float32Array(CLOUD_N);
+  const pha = new Float32Array(CLOUD_N);
+  const siz = new Float32Array(CLOUD_N);
+  const col = new Float32Array(CLOUD_N * 3);
+
+  const cHot  = new THREE.Color(0xe8fbff);
+  const cCool = new THREE.Color(0x2f7bff);
+  const cMid  = new THREE.Color(0x63d8ff);
+  const c = new THREE.Color();
+  const v = new THREE.Vector3();
+
+  for (let i = 0; i < CLOUD_N; i++) {
+    v.set(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1);
+    if (v.lengthSq() < 1e-4) v.set(1, 0, 0);
+    v.normalize();
+    const r = CORE_R * Math.pow(Math.random(), 0.62) * 0.97;
+
+    dir[i * 3] = v.x; dir[i * 3 + 1] = v.y; dir[i * 3 + 2] = v.z;
+    rad[i] = r;
+    pha[i] = Math.random() * Math.PI * 2;
+    siz[i] = 0.40 + Math.pow(Math.random(), 3.2) * 1.70;
+
+    const k = r / CORE_R;
+    if (k < 0.5) c.copy(cHot).lerp(cMid, k / 0.5);
+    else         c.copy(cMid).lerp(cCool, (k - 0.5) / 0.5);
+    const boost = Math.random() < 0.03 ? 2.2 : 1.0;
+    col[i * 3] = c.r * boost; col[i * 3 + 1] = c.g * boost; col[i * 3 + 2] = c.b * boost;
+  }
+
+  cloudGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(CLOUD_N * 3), 3));
+  cloudGeo.setAttribute('aDir',   new THREE.BufferAttribute(dir, 3));
+  cloudGeo.setAttribute('aR',     new THREE.BufferAttribute(rad, 1));
+  cloudGeo.setAttribute('aPhase', new THREE.BufferAttribute(pha, 1));
+  cloudGeo.setAttribute('aSize',  new THREE.BufferAttribute(siz, 1));
+  cloudGeo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+}
+
+const cloudMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uPR: { value: PR }, uPower: { value: 1 } },
+  vertexShader: /* glsl */`
+    attribute vec3  aDir;
+    attribute float aR;
+    attribute float aPhase;
+    attribute float aSize;
+    attribute vec3  aColor;
+    uniform float uTime;
+    uniform float uPR;
+    varying vec3  vCol;
+    varying float vFade;
+
+    void main() {
+      float rr = aR * (1.0 + sin(uTime * 1.15 + aPhase) * 0.085);
+      vec3 p = aDir * rr;
+      float ang = uTime * (0.22 + 0.55 / (rr + 0.55));
+      float ca = cos(ang), sa = sin(ang);
+      p = vec3(p.x * ca - p.z * sa, p.y, p.x * sa + p.z * ca);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_Position = projectionMatrix * mv;
+
+      float d = -mv.z;
+      gl_PointSize = clamp(aSize * uPR * (44.0 / max(d, 0.001)), 0.7, 9.0 * uPR);
+
+      vCol = aColor;
+      vFade = smoothstep(0.0, 1.2, rr) * (1.0 - smoothstep(1.29, 1.52, rr) * 0.5);
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform float uPower;
+    varying vec3  vCol;
+    varying float vFade;
+    void main() {
+      vec2 uv = gl_PointCoord - 0.5;
+      float d = length(uv);
+      if (d > 0.5) discard;
+      float a = smoothstep(0.5, 0.05, d);
+      gl_FragColor = vec4(vCol, a * vFade * 0.11 * uPower);
+    }
+  `,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+});
+const cloud = new THREE.Points(cloudGeo, cloudMat);
+cloud.frustumCulled = false;
+cloud.renderOrder = 2;
+scene.add(cloud);
+
+/* ═══════════════════════════ 切伦科夫辐射 ═══════════════════════════ */
+const CH_N = 1000;
+const chGeo = new THREE.BufferGeometry();
+{
+  const pos = new Float32Array(CH_N * 2 * 3);
+  const pha = new Float32Array(CH_N * 2);
+  const col = new Float32Array(CH_N * 2 * 3);
+
+  const cIn  = new THREE.Color(0xd8f8ff);
+  const cOut = new THREE.Color(0x1c6cff);
+  const c = new THREE.Color();
+  const v = new THREE.Vector3();
+
+  for (let i = 0; i < CH_N; i++) {
+    v.set(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1).normalize();
+    const r0 = 1.58 + Math.random() * 0.05;
+    const r1 = r0 + 0.12 + Math.pow(Math.random(), 2.2) * 1.05;
+    const p = Math.random();
+
+    for (let s = 0; s < 2; s++) {
+      const idx = i * 2 + s;
+      const r = s === 0 ? r0 : r1;
+      pos[idx * 3 + 0] = v.x * r;
+      pos[idx * 3 + 1] = v.y * r;
+      pos[idx * 3 + 2] = v.z * r;
+      pha[idx] = p;
+      c.copy(cIn).lerp(cOut, s === 0 ? 0.0 : 1.0);
+      col[idx * 3 + 0] = c.r; col[idx * 3 + 1] = c.g; col[idx * 3 + 2] = c.b;
+    }
+  }
+  chGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  chGeo.setAttribute('aPhase',  new THREE.BufferAttribute(pha, 1));
+  chGeo.setAttribute('aColor',  new THREE.BufferAttribute(col, 3));
+}
+const chMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uPower: { value: 1 } },
+  vertexShader: /* glsl */`
+    attribute float aPhase;
+    attribute vec3  aColor;
+    uniform float uTime;
+    varying vec3  vCol;
+    varying float vA;
+    void main() {
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_Position = projectionMatrix * mv;
+      vCol = aColor;
+      vA = 0.02 + 0.98 * pow(abs(sin(uTime * 1.9 + aPhase * 43.0)), 6.0);
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform float uPower;
+    varying vec3  vCol;
+    varying float vA;
+    void main() {
+      gl_FragColor = vec4(vCol, vA * 0.30 * uPower);
+    }
+  `,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+});
+const cherenkov = new THREE.LineSegments(chGeo, chMat);
+cherenkov.frustumCulled = false;
+cherenkov.renderOrder = 3;
+scene.add(cherenkov);
+
+/* ═══════════════════════════ 光晕 ═══════════════════════════ */
+const haloMat = new THREE.SpriteMaterial({
+  map: radialTexture([
+    [0.00, 'rgba(200,245,255,0.55)'],
+    [0.14, 'rgba(70,170,255,0.30)'],
+    [0.38, 'rgba(30,90,220,0.12)'],
+    [0.72, 'rgba(10,30,90,0.035)'],
+    [1.00, 'rgba(0,0,0,0)'],
+  ]),
+  blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, depthTest: false, opacity: 0.30,
+});
+const halo = new THREE.Sprite(haloMat);
+halo.scale.setScalar(10.5);
+halo.renderOrder = 20;
+scene.add(halo);
+
+/* ═══════════════════════════ 金属结构 ═══════════════════════════ */
+const metal = new THREE.MeshPhysicalMaterial({
+  color: 0x2c4661,
+  metalness: 0.55,
+  roughness: 0.30,
+  clearcoat: 0.30,
+  clearcoatRoughness: 0.26,
+  envMapIntensity: 0.75,
+  emissive: new THREE.Color(0x050f1a),
+});
+const darkMetal = new THREE.MeshPhysicalMaterial({
+  color: 0x0d141f,
+  metalness: 0.38,
+  roughness: 0.45,
+  clearcoat: 0.18,
+  envMapIntensity: 0.20,
+  emissive: new THREE.Color(0x03070c),
+});
+
+const rig = new THREE.Group();
+scene.add(rig);
+
+function makeRing(radius, tube, y, emissive) {
+  const mesh = new THREE.Mesh(new THREE.TorusGeometry(radius, tube, 16, 220), metal);
+  mesh.rotation.x = Math.PI / 2;
+  mesh.position.y = y;
+  rig.add(mesh);
+
+  if (emissive) {
+    const glow = new THREE.Mesh(
+      new THREE.TorusGeometry(radius, tube * 0.30, 8, 220),
+      new THREE.MeshBasicMaterial({
+        color: emissive, transparent: true, opacity: 0.85,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      })
+    );
+    glow.rotation.x = Math.PI / 2;
+    glow.position.y = y + tube * 0.72;
+    rig.add(glow);
+  }
+  return mesh;
+}
+
+makeRing(SHELL_R + 0.22, 0.075, 0, 0x66ddff);
+makeRing(SHELL_R - 0.46, 0.045, 1.72, null);
+makeRing(SHELL_R - 0.46, 0.045, -1.72, null);
+
+// 8 根立柱
+const strutGeo = new THREE.CylinderGeometry(0.032, 0.032, 3.44, 10);
+for (let i = 0; i < 8; i++) {
+  const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
+  const rr = SHELL_R - 0.46;
+  const s = new THREE.Mesh(strutGeo, metal);
+  s.position.set(Math.cos(a) * rr, 0, Math.sin(a) * rr);
+  rig.add(s);
+}
+
+/* ── 控制棒：可点击、可插入 ── */
+const ROD_N = 6;
+const rods = [];
+const rodGeo = new THREE.CylinderGeometry(0.055, 0.055, 3.0, 12);
+const rodTipGeo = new THREE.BoxGeometry(0.15, 0.12, 0.15);
+
+for (let i = 0; i < ROD_N; i++) {
+  const a = (i / ROD_N) * Math.PI * 2;
+  const rr = 0.92;
+
+  const holder = new THREE.Group();
+  holder.position.set(Math.cos(a) * rr, 3.1, Math.sin(a) * rr);
+
+  // 每根独立材质，才能单独高亮
+  const mat = darkMetal.clone();
+  const rod = new THREE.Mesh(rodGeo, mat);
+  rod.position.y = -1.5;
+  rod.userData.pick = 'rod';
+  rod.userData.index = i;
+  holder.add(rod);
+
+  const tipMat = new THREE.MeshBasicMaterial({
+    color: 0x8fe8ff, transparent: true, opacity: 0.9,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const tip = new THREE.Mesh(rodTipGeo, tipMat);
+  tip.position.y = -3.0;
+  holder.add(tip);
+
+  const head = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.26, 14), metal);
+  head.position.y = 0.16;
+  holder.add(head);
+
+  rig.add(holder);
+  rods.push({
+    holder, mat, tipMat,
+    base: 3.1,
+    pos: 0,      // 0 = 抽出，1 = 完全插入
+    target: 0,
+    phase: i * 0.9,
+  });
+}
+
+/* ── 基座与冷却回路：装置是"落"在环形基座上的，不是浮在空中的 ── */
+const rigLow = new THREE.Group();
+scene.add(rigLow);
+
+{
+  const BASE_Y = -3.66;
+  const BASE_R = 5.05;
+
+  // 底座环
+  const base = new THREE.Mesh(
+    new THREE.CylinderGeometry(BASE_R, BASE_R + 0.18, 0.22, 96, 1, false),
+    new THREE.MeshPhysicalMaterial({
+      color: 0x1a2534, metalness: 0.55, roughness: 0.52,
+      clearcoat: 0.12, envMapIntensity: 0.45,
+    })
+  );
+  base.position.y = BASE_Y;
+  rigLow.add(base);
+
+  // 环上的防滑纹（细环）
+  const tread = new THREE.Mesh(
+    new THREE.TorusGeometry(BASE_R - 0.06, 0.035, 8, 96),
+    new THREE.MeshPhysicalMaterial({
+      color: 0x2b3a4c, metalness: 0.7, roughness: 0.36, envMapIntensity: 0.6,
+    })
+  );
+  tread.rotation.x = Math.PI / 2;
+  tread.position.y = BASE_Y + 0.12;
+  rigLow.add(tread);
+
+  // 斜撑：基座 → 赤道环
+  const strutMat = new THREE.MeshPhysicalMaterial({
+    color: 0x23303f, metalness: 0.62, roughness: 0.42,
+    clearcoat: 0.15, envMapIntensity: 0.55,
+  });
+  const up = new THREE.Vector3(0, 1, 0);
+  const dir = new THREE.Vector3();
+
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
+    const from = new THREE.Vector3(Math.cos(a) * (BASE_R - 0.28), BASE_Y + 0.16, Math.sin(a) * (BASE_R - 0.28));
+    const to   = new THREE.Vector3(Math.cos(a) * (SHELL_R - 0.46), 1.68, Math.sin(a) * (SHELL_R - 0.46));
+
+    dir.subVectors(to, from);
+    const len = dir.length();
+    const s = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.052, len, 8), strutMat);
+    s.position.copy(from).addScaledVector(dir, 0.5);
+    s.quaternion.setFromUnitVectors(up, dir.clone().normalize());
+    rigLow.add(s);
+  }
+}
+
+/* ── 四条立式冷却立管：从基座垂直上来，弯头接到堆体下部 ── */
+{
+  const pipeMat = new THREE.MeshPhysicalMaterial({
+    color: 0x2c3c4e, metalness: 0.68, roughness: 0.34,
+    clearcoat: 0.2, envMapIntensity: 0.7,
+  });
+  const collarMat = new THREE.MeshPhysicalMaterial({
+    color: 0x3a4d61, metalness: 0.75, roughness: 0.28, envMapIntensity: 0.9,
+  });
+
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI * 2 + Math.PI / 4;   // 避开正前方
+    const cos = Math.cos(a), sin = Math.sin(a);
+    const rOuter = 4.05;
+
+    // 末端必须落在球面上：球半径 2.62，在 y 处的截面半径 = sqrt(R² - y²)
+    const yEnd = -1.60;
+    const rInner = Math.sqrt(SHELL_R * SHELL_R - yEnd * yEnd) - 0.015;
+
+    const curve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(cos * rOuter, -3.55, sin * rOuter),
+      new THREE.Vector3(cos * rOuter, -2.10, sin * rOuter),
+      new THREE.Vector3(cos * (rOuter - 0.30), -1.15, sin * (rOuter - 0.30)),
+      new THREE.Vector3(cos * (rInner + 0.50), -1.30, sin * (rInner + 0.50)),
+      new THREE.Vector3(cos * rInner, yEnd, sin * rInner),
+    ]);
+    const g = new THREE.TubeGeometry(curve, 72, 0.088, 12, false);
+    rigLow.add(new THREE.Mesh(g, pipeMat));
+
+    // 球壳上的接管嘴：沿球面法线插进去，补齐那最后一点缝
+    const nDir = new THREE.Vector3(cos * rInner, yEnd, sin * rInner).normalize();
+    const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.145, 0.165, 0.16, 16), collarMat);
+    nozzle.position.set(cos * (rInner - 0.02), yEnd, sin * (rInner - 0.02));
+    nozzle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), nDir);
+    rigLow.add(nozzle);
+
+    // 管路上的法兰
+    for (const u of [0.10, 0.34]) {
+      const p = curve.getPointAt(u);
+      const f = new THREE.Mesh(new THREE.CylinderGeometry(0.135, 0.135, 0.055, 16), collarMat);
+      const tangent = curve.getTangentAt(u);
+      f.position.copy(p);
+      f.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tangent);
+      rigLow.add(f);
+    }
+
+    // 软管的三通接头（挂在立管竖直段上）
+    const tee = new THREE.Mesh(new THREE.CylinderGeometry(0.115, 0.115, 0.30, 14), collarMat);
+    tee.position.set(cos * rOuter, -2.30, sin * rOuter);
+    rigLow.add(tee);
+
+    // 基座上的接口墩
+    const pad = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.20, 0.24, 0.16, 14),
+      new THREE.MeshPhysicalMaterial({ color: 0x1d2938, metalness: 0.6, roughness: 0.45 })
+    );
+    pad.position.set(cos * rOuter, -3.55, sin * rOuter);
+    rigLow.add(pad);
+  }
+}
+
+/* ── 赤道环上的法兰螺栓（96 颗，InstancedMesh 一次 draw call） ── */
+{
+  const BOLT_N = 96;
+  const boltGeo = new THREE.BoxGeometry(0.062, 0.05, 0.062);
+  const boltMat = new THREE.MeshPhysicalMaterial({
+    color: 0x1b2736, metalness: 0.78, roughness: 0.32,
+    clearcoat: 0.4, envMapIntensity: 0.85,
+  });
+  const bolts = new THREE.InstancedMesh(boltGeo, boltMat, BOLT_N);
+  const m4 = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const v3 = new THREE.Vector3();
+  const s3 = new THREE.Vector3(1, 1, 1);
+  for (let i = 0; i < BOLT_N; i++) {
+    const a = (i / BOLT_N) * Math.PI * 2;
+    const r = SHELL_R + 0.22;
+    v3.set(Math.cos(a) * r, 0.115, Math.sin(a) * r);
+    q.setFromEuler(new THREE.Euler(0, -a, 0));
+    m4.compose(v3, q, s3);
+    bolts.setMatrixAt(i, m4);
+  }
+  bolts.instanceMatrix.needsUpdate = true;
+  rig.add(bolts);
+
+  // 立柱根部的加固环
+  const collarGeo = new THREE.TorusGeometry(0.075, 0.018, 6, 16);
+  const collarMat = new THREE.MeshPhysicalMaterial({
+    color: 0x22303f, metalness: 0.7, roughness: 0.38, envMapIntensity: 0.7,
+  });
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
+    const rr = SHELL_R - 0.46;
+    for (const y of [1.68, -1.68]) {
+      const c = new THREE.Mesh(collarGeo, collarMat);
+      c.rotation.x = Math.PI / 2;
+      c.position.set(Math.cos(a) * rr, y, Math.sin(a) * rr);
+      rig.add(c);
+    }
+  }
+}
+
+/* ── 控制棒顶部的线缆：每帧重算顶点，棒升降时线缆跟着走 ── */
+const CABLE_SEG = 36, CABLE_RAD = 6, CABLE_R = 0.014;
+const cables = [];
+const cableMat = new THREE.MeshPhysicalMaterial({
+  color: 0x0e1620, metalness: 0.35, roughness: 0.62, envMapIntensity: 0.35,
+});
+{
+  const placeholder = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0),
+    new THREE.Vector3(0, 2, 0), new THREE.Vector3(0, 3, 0),
+  ]);
+  for (let i = 0; i < ROD_N; i++) {
+    const geo = new THREE.TubeGeometry(placeholder, CABLE_SEG, CABLE_R, CABLE_RAD, false);
+    const mesh = new THREE.Mesh(geo, cableMat);
+    mesh.frustumCulled = false;
+    rig.add(mesh);
+    cables.push({ mesh, idx: i, lastY: -999 });
+  }
+}
+
+const _tubeP = new THREE.Vector3();
+function updateTubeGeometry(geo, curve, tubularSegments, radialSegments, radius) {
+  const pos = geo.attributes.position;
+  const frames = curve.computeFrenetFrames(tubularSegments, false);
+  let k = 0;
+  for (let i = 0; i <= tubularSegments; i++) {
+    curve.getPoint(i / tubularSegments, _tubeP);   // 不用 getPointAt：省掉每帧弧长反解
+    const N = frames.normals[i], B = frames.binormals[i];
+    for (let j = 0; j <= radialSegments; j++) {
+      const v = (j / radialSegments) * Math.PI * 2;
+      const sn = Math.sin(v), cs = -Math.cos(v);
+      pos.setXYZ(
+        k++,
+        _tubeP.x + radius * (cs * N.x + sn * B.x),
+        _tubeP.y + radius * (cs * N.y + sn * B.y),
+        _tubeP.z + radius * (cs * N.z + sn * B.z)
+      );
+    }
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+}
+
+function updateCable(c, force) {
+  const i = c.idx;
+  const r = rods[i];
+  const yTop = r.holder.position.y + 0.28;
+  if (!force && Math.abs(yTop - c.lastY) < 0.0015) return;
+  c.lastY = yTop;
+
+  const a = (i / ROD_N) * Math.PI * 2;
+  const x0 = Math.cos(a) * 0.92, z0 = Math.sin(a) * 0.92;
+  const x1 = Math.cos(a + 0.30) * (SHELL_R - 0.46);
+  const z1 = Math.sin(a + 0.30) * (SHELL_R - 0.46);
+  const yMid = Math.min(yTop + 0.42, 3.62);
+
+  const curve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(x0, yTop, z0),
+    new THREE.Vector3(x0 * 1.10, yMid, z0 * 1.10),
+    new THREE.Vector3(x1 * 0.90, Math.max(yMid - 0.55, 1.9), z1 * 0.90),
+    new THREE.Vector3(x1, 1.74, z1),
+  ]);
+  updateTubeGeometry(c.mesh.geometry, curve, CABLE_SEG, CABLE_RAD, CABLE_R);
+}
+for (const c of cables) updateCable(c, true);
+
+/* ═══════════════════════════ 柔性冷却软管（Verlet 软体） ═══════════════════════════
+   不是所有东西都是硬管。这里用质点链 + 距离约束 + 地面碰撞做两根会垂、会晃、
+   注水时会被顶得抖起来的橡胶软管。每帧把质点链当样条重新生成 TubeGeometry。 */
+const HOSE_N = 24;
+const HOSE_SEG = 0.155;
+const HOSE_R = 0.062;
+const HOSE_GROUND = -3.60;
+const hoses = [];
+
+const hoseMat = new THREE.MeshPhysicalMaterial({
+  color: 0x1c2836,
+  metalness: 0.18,
+  roughness: 0.55,
+  clearcoat: 0.35,
+  clearcoatRoughness: 0.40,
+  envMapIntensity: 1.0,
+});
+
+function makeHose(start, end) {
+  const pts = [], prevPts = [];
+
+  for (let i = 0; i < HOSE_N; i++) {
+    const t = i / (HOSE_N - 1);
+    const p = new THREE.Vector3().lerpVectors(start, end, t);
+    p.y -= Math.sin(t * Math.PI) * 0.55;
+    pts.push(p);
+    prevPts.push(p.clone());
+  }
+
+  const geo = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 44, HOSE_R, 8, false);
+  const mesh = new THREE.Mesh(geo, hoseMat);
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+
+  hoses.push({ pts, prev: prevPts, geo, anchor: start, anchorEnd: end, seed: Math.random() * 6.28 });
+}
+
+// 从两条立管的三通接头分出来，垂到地面
+for (const a of [Math.PI * 0.25, Math.PI * 1.25]) {
+  const s = new THREE.Vector3(Math.cos(a) * 4.05, -2.30, Math.sin(a) * 4.05);
+  const e = new THREE.Vector3(Math.cos(a + 0.55) * 5.60, HOSE_GROUND, Math.sin(a + 0.55) * 5.60);
+  makeHose(s, e);
+}
+
+const _hoseVec = new THREE.Vector3();
+
+function stepHose(h, dt, t) {
+  const g = -3.4 * dt * dt;
+  const damp = 0.985;
+
+  for (let i = 1; i < HOSE_N; i++) {
+    const p = h.pts[i], q = h.prev[i];
+    const vx = (p.x - q.x) * damp;
+    const vy = (p.y - q.y) * damp;
+    const vz = (p.z - q.z) * damp;
+    q.copy(p);
+    p.x += vx;
+    p.y += vy + g;
+    p.z += vz;
+
+    // 一点点持续的涌动 —— 让人看得出这管子是软的、里面有流体
+    const w = Math.sin((i / HOSE_N) * Math.PI);
+    p.x += Math.sin(t * 0.85 + i * 0.33 + h.seed) * 0.00040 * w;
+    p.z += Math.cos(t * 0.71 + i * 0.39 + h.seed) * 0.00040 * w;
+  }
+
+  // 距离约束：迭代几次让整条链保持长度
+  for (let iter = 0; iter < 5; iter++) {
+    for (let i = 0; i < HOSE_N - 1; i++) {
+      const a = h.pts[i], b = h.pts[i + 1];
+      const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-5;
+      const diff = ((d - HOSE_SEG) / d) * 0.5;
+      const ox = dx * diff, oy = dy * diff, oz = dz * diff;
+
+      if (i !== 0) { a.x += ox; a.y += oy; a.z += oz; }
+      b.x -= ox; b.y -= oy; b.z -= oz;
+    }
+
+    // 地面 + 侧向摩擦
+    for (let i = 1; i < HOSE_N; i++) {
+      const p = h.pts[i];
+      if (p.y < HOSE_GROUND) {
+        p.y = HOSE_GROUND;
+        const q = h.prev[i];
+        q.x += (p.x - q.x) * 0.55;
+        q.z += (p.z - q.z) * 0.55;
+      }
+    }
+  }
+
+  // 首端硬固定在接口上，末端软锚在地面（受冲击时会被拖走一段再回来）
+  h.pts[0].copy(h.anchor);
+  const e = h.pts[HOSE_N - 1];
+  e.x += (h.anchorEnd.x - e.x) * 0.14;
+  e.y += (h.anchorEnd.y - e.y) * 0.14;
+  e.z += (h.anchorEnd.z - e.z) * 0.14;
+
+  // 重建管体
+  const curve = new THREE.CatmullRomCurve3(h.pts);
+  updateTubeGeometry(h.geo, curve, 44, 8, HOSE_R);
+}
+
+function kickHoses(power) {
+  for (const h of hoses) {
+    for (let i = 4; i < HOSE_N; i++) {
+      const k = power * (0.5 + Math.random());
+      h.prev[i].x += (Math.random() - 0.5) * k;
+      h.prev[i].y += (Math.random() - 0.5) * k * 0.6;
+      h.prev[i].z += (Math.random() - 0.5) * k;
+    }
+  }
+}
+
+/* ── 顶部驱动机构：一圈小小的执行器 ── */
+{
+  const actGeo = new THREE.CylinderGeometry(0.075, 0.075, 0.20, 10);
+  const actMat = new THREE.MeshPhysicalMaterial({
+    color: 0x25333f, metalness: 0.6, roughness: 0.4, envMapIntensity: 0.6,
+  });
+  for (let i = 0; i < 12; i++) {
+    const a = (i / 12) * Math.PI * 2 + 0.13;
+    const r = 1.62;
+    const act = new THREE.Mesh(actGeo, actMat);
+    act.position.set(Math.cos(a) * r, 3.42, Math.sin(a) * r);
+    rig.add(act);
+  }
+}
+
+/* ═══════════════════════════ 扫描环 ═══════════════════════════ */
+const scanRing = new THREE.Mesh(
+  new THREE.TorusGeometry(1, 0.012, 8, 200),
+  new THREE.MeshBasicMaterial({
+    color: 0x9fe8ff, transparent: true, opacity: 0.0,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  })
+);
+scanRing.rotation.x = Math.PI / 2;
+scanRing.renderOrder = 11;
+scene.add(scanRing);
+
+/* ═══════════════════════════ 冲击波环 ═══════════════════════════ */
+const shockMat = new THREE.MeshBasicMaterial({
+  color: 0xbfefff, transparent: true, opacity: 0, side: THREE.DoubleSide,
+  blending: THREE.AdditiveBlending, depthWrite: false,
+});
+const shock = new THREE.Mesh(new THREE.RingGeometry(0.94, 1.0, 128), shockMat);
+shock.rotation.x = -Math.PI / 2;
+shock.renderOrder = 12;
+scene.add(shock);
+let shockT = -1;
+
+/* ═══════════════════════════ 爆炸：碎屑 + 火球 ═══════════════════════════ */
+const DEBRIS_N = 260;
+const debrisMat = new THREE.MeshPhysicalMaterial({
+  color: 0x2a3542,
+  metalness: 0.72,
+  roughness: 0.42,
+  emissive: new THREE.Color(0x140401),
+  envMapIntensity: 0.8,
+});
+const debris = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), debrisMat, DEBRIS_N);
+debris.frustumCulled = false;
+debris.count = 0;
+scene.add(debris);
+
+const debrisState = [];
+let debrisActive = false;
+
+const fireballMat = new THREE.SpriteMaterial({
+  map: radialTexture([
+    [0.00, 'rgba(255,252,240,1.00)'],
+    [0.22, 'rgba(255,196,96,0.92)'],
+    [0.48, 'rgba(255,96,26,0.52)'],
+    [0.76, 'rgba(160,34,8,0.16)'],
+    [1.00, 'rgba(80,10,0,0)'],
+  ], 256),
+  blending: THREE.AdditiveBlending,
+  transparent: true,
+  depthWrite: false,
+  opacity: 0,
+});
+const fireball = new THREE.Sprite(fireballMat);
+fireball.scale.setScalar(1);
+fireball.renderOrder = 30;
+scene.add(fireball);
+
+let fireT = -1;
+
+function spawnDebris() {
+  debrisState.length = 0;
+  for (let i = 0; i < DEBRIS_N; i++) {
+    const dir = new THREE.Vector3(
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1
+    ).normalize();
+    const speed = 2.5 + Math.random() * 11;
+
+    debrisState.push({
+      p: new THREE.Vector3(
+        (Math.random() - 0.5) * 2.6,
+        (Math.random() - 0.5) * 2.2,
+        (Math.random() - 0.5) * 2.6
+      ),
+      v: dir.multiplyScalar(speed).add(new THREE.Vector3(0, 1.6 + Math.random() * 4.5, 0)),
+      r: new THREE.Euler(Math.random() * 6.28, Math.random() * 6.28, Math.random() * 6.28),
+      rv: new THREE.Vector3(
+        (Math.random() - 0.5) * 9,
+        (Math.random() - 0.5) * 9,
+        (Math.random() - 0.5) * 9
+      ),
+      s: 0.028 + Math.random() * 0.11,
+    });
+  }
+  debris.count = DEBRIS_N;
+  debrisActive = true;
+}
+
+const _dM = new THREE.Matrix4();
+const _dQ = new THREE.Quaternion();
+const _dS = new THREE.Vector3();
+
+function updateDebris(dt) {
+  if (!debrisActive) return;
+  for (let i = 0; i < DEBRIS_N; i++) {
+    const d = debrisState[i];
+    d.v.y -= 15 * dt;
+    d.p.addScaledVector(d.v, dt);
+
+    if (d.p.y < -3.55) {
+      d.p.y = -3.55;
+      d.v.y *= -0.30;
+      d.v.x *= 0.62;
+      d.v.z *= 0.62;
+      d.rv.multiplyScalar(0.55);
+    }
+
+    d.r.x += d.rv.x * dt;
+    d.r.y += d.rv.y * dt;
+    d.r.z += d.rv.z * dt;
+
+    _dQ.setFromEuler(d.r);
+    _dS.setScalar(d.s);
+    _dM.compose(d.p, _dQ, _dS);
+    debris.setMatrixAt(i, _dM);
+  }
+  debris.instanceMatrix.needsUpdate = true;
+}
+
+/* ═══════════════════════════ 地面 ═══════════════════════════
+   试过 Reflector 真反射，效果是"装置漂在湖面上"——倒影像第二个堆，
+   反而破坏了调性。退回暗地板 + 手绘倒影光斑，可控得多。 */
+const floor = new THREE.Mesh(
+  new THREE.CircleGeometry(26, 96),
+  new THREE.MeshPhysicalMaterial({
+    color: 0x04070c,
+    metalness: 0.04,
+    roughness: 0.96,
+    envMapIntensity: 0.04,
+  })
+);
+floor.rotation.x = -Math.PI / 2;
+floor.position.y = -3.78;
+scene.add(floor);
+
+const gridMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: /* glsl */`
+    varying vec2 vP;
+    void main() {
+      vP = position.xy;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform float uTime;
+    varying vec2 vP;
+    void main() {
+      float r = length(vP);
+      float ang = atan(vP.y, vP.x);
+
+      float dr = r / 1.35;
+      float cd = min(fract(dr), 1.0 - fract(dr));
+      float ringLine = smoothstep(0.033, 0.0, cd);
+
+      float seg = 24.0;
+      float da = ang / 6.2831853 * seg;
+      float dd = min(fract(da), 1.0 - fract(da));
+      float spoke = smoothstep(0.03, 0.0, dd);
+
+      float pulseR = mod(uTime * 2.2, 18.0);
+      float pulse = smoothstep(0.55, 0.0, abs(r - pulseR));
+
+      float fade = smoothstep(15.0, 3.6, r);
+      float inner = smoothstep(2.6, 3.4, r);
+
+      vec3 col = vec3(0.10, 0.36, 0.72) * ringLine * 0.45
+               + vec3(0.08, 0.28, 0.60) * spoke * 0.24
+               + vec3(0.35, 0.75, 1.00) * pulse * 0.34
+               + vec3(0.02, 0.07, 0.16) * fade;
+
+      float a = (ringLine * 0.14 + spoke * 0.07) * fade * inner
+              + pulse * 0.11 * fade
+              + 0.010 * fade;
+
+      gl_FragColor = vec4(col, clamp(a, 0.0, 1.0));
+    }
+  `,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+});
+const grid = new THREE.Mesh(new THREE.CircleGeometry(18, 160), gridMat);
+grid.rotation.x = -Math.PI / 2;
+grid.position.y = -3.72;
+grid.renderOrder = 1;
+scene.add(grid);
+
+/* ═══════════════════════════ 体积光柱 ═══════════════════════════
+   一根从顶部打下来的光锥。真做体积散射要额外 RT，这里是几何版：
+   圆柱侧面用 fresnel 让"正对相机"的地方最亮，边缘自然淡出。 */
+const shaftMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uPower: { value: 1 } },
+  vertexShader: /* glsl */`
+    varying vec2  vUv;
+    varying vec3  vN;
+    varying vec3  vV;
+    void main() {
+      vUv = uv;
+      vN = normalize(normalMatrix * normal);
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vV = -mv.xyz;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform float uTime;
+    uniform float uPower;
+    varying vec2  vUv;
+    varying vec3  vN;
+    varying vec3  vV;
+    void main() {
+      // 正对相机的侧面最亮 —— 圆柱侧面的"芯"
+      float core = pow(abs(dot(normalize(vN), normalize(vV))), 1.7);
+
+      // 上下两端淡出，中间偏下最浓
+      float vert = smoothstep(0.02, 0.34, vUv.y) * (1.0 - smoothstep(0.66, 1.0, vUv.y));
+
+      // 缓慢流动的条纹，模拟空气里的密度不均
+      float bands = 0.78
+        + 0.14 * sin(vUv.x * 34.0 + uTime * 0.32)
+        + 0.08 * sin(vUv.x * 11.0 - uTime * 0.19 + vUv.y * 5.0);
+
+      float a = core * vert * bands * 0.065 * uPower;
+      gl_FragColor = vec4(vec3(0.38, 0.74, 1.0), a);
+    }
+  `,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+});
+const shaft = new THREE.Mesh(
+  new THREE.CylinderGeometry(2.15, 4.05, 8.9, 64, 1, true),
+  shaftMat
+);
+shaft.position.y = 0.75;
+shaft.renderOrder = 21;
+scene.add(shaft);
+
+/* ═══════════════════════════ 光里的浮尘 ═══════════════════════════ */
+const DUST_N = 1100;
+let dust, dustMat;
+{
+  const pos = new Float32Array(DUST_N * 3);
+  const rArr = new Float32Array(DUST_N);
+  const yArr = new Float32Array(DUST_N);
+  const spd  = new Float32Array(DUST_N);
+  const siz  = new Float32Array(DUST_N);
+  const pha  = new Float32Array(DUST_N);
+
+  for (let i = 0; i < DUST_N; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = Math.sqrt(Math.random()) * 4.0;
+    pos[i * 3]     = Math.cos(a) * r;
+    pos[i * 3 + 1] = -3.6 + Math.random() * 14;
+    pos[i * 3 + 2] = Math.sin(a) * r;
+    rArr[i] = r;
+    yArr[i] = pos[i * 3 + 1];
+    spd[i]  = 0.05 + Math.random() * 0.22;
+    siz[i]  = 0.5 + Math.random() * 1.6;
+    pha[i]  = Math.random() * 6.283;
+  }
+
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('aR',   new THREE.BufferAttribute(rArr, 1));
+  g.setAttribute('aY',   new THREE.BufferAttribute(yArr, 1));
+  g.setAttribute('aSpd', new THREE.BufferAttribute(spd, 1));
+  g.setAttribute('aSize',new THREE.BufferAttribute(siz, 1));
+  g.setAttribute('aPhase', new THREE.BufferAttribute(pha, 1));
+
+  dustMat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uPR: { value: PR }, uPower: { value: 1 } },
+    vertexShader: /* glsl */`
+      attribute float aR;
+      attribute float aY;
+      attribute float aSpd;
+      attribute float aSize;
+      attribute float aPhase;
+      uniform float uTime;
+      uniform float uPR;
+      varying float vA;
+
+      void main() {
+        // 缓慢上浮 + 横向涡旋
+        float y = mod(aY + uTime * aSpd + 3.6, 14.0) - 3.6;
+        float ang = aPhase + uTime * 0.035 * (1.0 - aR / 8.0);
+        vec3 p = vec3(
+          cos(ang) * aR + sin(uTime * 0.13 + aPhase) * 0.25,
+          y,
+          sin(ang) * aR + cos(uTime * 0.11 + aPhase) * 0.25
+        );
+
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        gl_Position = projectionMatrix * mv;
+        gl_PointSize = clamp(aSize * uPR * (70.0 / max(-mv.z, 0.001)), 0.6, 7.0 * uPR);
+
+        // 光柱内的亮，越靠外越暗
+        float inBeam = clamp(1.0 - aR / 4.0, 0.0, 1.0);
+        float twinkle = 0.55 + 0.45 * sin(uTime * (0.8 + fract(aPhase * 7.13)) + aPhase * 3.0);
+        vA = inBeam * inBeam * twinkle;
+      }
+    `,
+    fragmentShader: /* glsl */`
+      varying float vA;
+      void main() {
+        vec2 uv = gl_PointCoord - 0.5;
+        float d = length(uv);
+        if (d > 0.5) discard;
+        gl_FragColor = vec4(0.62, 0.85, 1.0, smoothstep(0.5, 0.0, d) * vA * 0.24);
+      }
+    `,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  });
+
+  dust = new THREE.Points(g, dustMat);
+  dust.frustumCulled = false;
+  dust.renderOrder = 22;
+  scene.add(dust);
+}
+
+/* ═══════════════════════════ 地面上的核心倒影 ═══════════════════════════ */
+const reflMat = new THREE.MeshBasicMaterial({
+  map: radialTexture([
+    [0.00, 'rgba(150,225,255,0.55)'],
+    [0.30, 'rgba(50,130,255,0.22)'],
+    [0.65, 'rgba(18,52,150,0.06)'],
+    [1.00, 'rgba(0,0,0,0)'],
+  ], 256),
+  transparent: true, opacity: 0.30, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
+const refl = new THREE.Mesh(new THREE.CircleGeometry(1, 72), reflMat);
+refl.rotation.x = -Math.PI / 2;
+refl.position.set(0, -3.70, 0);
+refl.scale.set(4.6, 1.55, 1);
+refl.renderOrder = 2;
+scene.add(refl);
+
+/* ═══════════════════════════ 悬浮仪表屏 ═══════════════════════════ */
+const screens = [];
+
+function makeScreen(x, y, z, rotY, label) {
+  const cv = document.createElement('canvas');
+  cv.width = 512; cv.height = 288;
+  const ctx = cv.getContext('2d');
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.minFilter = THREE.LinearFilter;
+
+  const group = new THREE.Group();
+  group.position.set(x, y, z);
+  group.rotation.y = rotY;
+
+  const bezel = new THREE.Mesh(
+    new THREE.PlaneGeometry(2.02, 1.16),
+    new THREE.MeshBasicMaterial({
+      color: 0x081522, transparent: true, opacity: 0.46,
+      side: THREE.DoubleSide, depthWrite: false,
+    })
+  );
+  group.add(bezel);
+
+  const screen = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.90, 1.06),
+    new THREE.MeshBasicMaterial({
+      map: tex, transparent: true, opacity: 0.92,
+      side: THREE.DoubleSide, depthWrite: false,
+    })
+  );
+  screen.position.z = 0.006;
+  group.add(screen);
+
+  // 屏幕的四角支架，让它像"挂"在空气里
+  const armGeo = new THREE.BoxGeometry(0.022, 0.022, 0.42);
+  for (const [sx, sy] of [[-0.92, 0.53], [0.92, 0.53], [-0.92, -0.53], [0.92, -0.53]]) {
+    const arm = new THREE.Mesh(armGeo, metal);
+    arm.position.set(sx, sy, -0.21);
+    group.add(arm);
+  }
+
+  scene.add(group);
+  const obj = { ctx, cv, tex, label };
+  screens.push(obj);
+  return obj;
+}
+
+makeScreen(-3.42, 1.55, 2.10, 0.24, 'FLUX');
+makeScreen(3.55, 1.15, 2.05, -0.22, 'CORE');
+
+function drawScreen(s, t, power) {
+  const { ctx, cv, tex, label } = s;
+  const W = cv.width, H = cv.height;
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(3,10,18,0.86)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.strokeStyle = 'rgba(80,180,255,0.13)';
+  ctx.lineWidth = 1;
+  for (let x = 0; x <= W; x += 48) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+  for (let y = 0; y <= H; y += 44) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+
+  // 波形
+  const amp = 22 + power * 26;
+  ctx.strokeStyle = 'rgba(130,232,255,0.95)';
+  ctx.lineWidth = 2.4;
+  ctx.beginPath();
+  for (let x = 0; x <= W; x += 3) {
+    const k = x / W;
+    const y = H * 0.56
+      + Math.sin(k * 15 + t * 3.1) * amp
+      + Math.sin(k * 43 - t * 5.3) * (6 + power * 6)
+      + Math.sin(k * 7 + t * 0.9) * 9;
+    if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // 顶部细线
+  ctx.strokeStyle = 'rgba(110,205,255,0.32)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, 54); ctx.lineTo(W, 54); ctx.stroke();
+
+  ctx.fillStyle = 'rgba(175,240,255,0.94)';
+  ctx.font = '20px ui-monospace, Consolas, monospace';
+  ctx.fillText('CORE-04 / ' + label, 18, 36);
+
+  ctx.fillStyle = 'rgba(110,205,255,0.66)';
+  ctx.font = '16px ui-monospace, Consolas, monospace';
+  ctx.fillText((power * 100).toFixed(1) + ' %', 18, H - 18);
+  ctx.fillText(t.toFixed(1) + ' s', W - 92, H - 18);
+
+  tex.needsUpdate = true;
+}
+
+/* ═══════════════════════════ 背景星尘 ═══════════════════════════ */
+let stars, starsMat;
+{
+  const N = 2200;
+  const pos = new Float32Array(N * 3);
+  const col = new Float32Array(N * 3);
+  const siz = new Float32Array(N);
+  const c = new THREE.Color();
+  for (let i = 0; i < N; i++) {
+    const r = 55 + Math.random() * 110;
+    const th = Math.random() * Math.PI * 2;
+    const ph = Math.acos(2 * Math.random() - 1);
+    pos[i * 3]     = r * Math.sin(ph) * Math.cos(th);
+    pos[i * 3 + 1] = r * Math.cos(ph) * 0.55;
+    pos[i * 3 + 2] = r * Math.sin(ph) * Math.sin(th);
+    siz[i] = 0.5 + Math.random() * 1.5;
+    c.setHSL(0.54 + Math.random() * 0.06, 0.55, 0.55 + Math.random() * 0.35);
+    col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+  g.setAttribute('aSize', new THREE.BufferAttribute(siz, 1));
+
+  starsMat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uPR: { value: PR } },
+    vertexShader: /* glsl */`
+      attribute vec3 aColor;
+      attribute float aSize;
+      uniform float uTime;
+      uniform float uPR;
+      varying vec3 vC;
+      varying float vT;
+      void main() {
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mv;
+        gl_PointSize = aSize * uPR * (130.0 / max(-mv.z, 1.0));
+        float h = fract(sin(dot(position.xyz, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+        vT = 0.35 + 0.65 * sin(uTime * (0.5 + h * 1.8) + h * 6.283);
+        vC = aColor;
+      }
+    `,
+    fragmentShader: /* glsl */`
+      varying vec3 vC;
+      varying float vT;
+      void main() {
+        vec2 uv = gl_PointCoord - 0.5;
+        float d = length(uv);
+        if (d > 0.5) discard;
+        gl_FragColor = vec4(vC, smoothstep(0.5, 0.0, d) * vT * 0.55);
+      }
+    `,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  });
+
+  stars = new THREE.Points(g, starsMat);
+  stars.frustumCulled = false;
+  scene.add(stars);
+}
+
+/* ═══════════════════════════ 后处理 ═══════════════════════════ */
+const composer = new EffectComposer(renderer);
+composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+composer.setSize(W(), H());
+composer.addPass(new RenderPass(scene, camera));
+
+const bloom = new UnrealBloomPass(new THREE.Vector2(W(), H()), 0.92, 0.52, 0.74);
+composer.addPass(bloom);
+
+/* 电影感：桶形色差 + 胶片颗粒 + 暗角 + 扫描线 */
+const FXShader = {
+  uniforms: {
+    tDiffuse:    { value: null },
+    uTime:       { value: 0 },
+    uRes:        { value: new THREE.Vector2(W(), H()) },
+    uAberration: { value: 0.0022 },
+    uGrain:      { value: 0.055 },
+    uVignette:   { value: 1.55 },
+  },
+  vertexShader: /* glsl */`
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform sampler2D tDiffuse;
+    uniform float uTime;
+    uniform vec2  uRes;
+    uniform float uAberration;
+    uniform float uGrain;
+    uniform float uVignette;
+    varying vec2 vUv;
+
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+    }
+
+    void main() {
+      vec2 uv = vUv;
+      vec2 c  = uv - 0.5;
+      float r2 = dot(c, c);
+
+      // 色差：越靠边缘越散
+      float ab = uAberration * (0.30 + r2 * 2.6);
+      vec3 col;
+      col.r = texture2D(tDiffuse, uv + c * ab).r;
+      col.g = texture2D(tDiffuse, uv).g;
+      col.b = texture2D(tDiffuse, uv - c * ab).b;
+
+      // 暗角
+      float vig = smoothstep(0.95, 0.10, r2 * uVignette);
+      col *= mix(1.0, vig, 0.82);
+
+      // 胶片颗粒（逐帧变化）
+      float n = hash(uv * uRes + fract(uTime) * 137.0);
+      col += (n - 0.5) * uGrain * (0.35 + 0.65 * (1.0 - vig));
+
+      gl_FragColor = vec4(max(col, 0.0), 1.0);
+    }
+  `,
+};
+
+const fxPass = new ShaderPass(FXShader);
+composer.addPass(fxPass);
+
+composer.addPass(new OutputPass());
+
+/* ═══════════════════════════ 状态 ═══════════════════════════ */
+const state = {
+  mode: 'online',     // online | scrambling | scrammed | starting | exploded
+  power: 1,
+  rodsIn: 0,
+  pulse: 0,
+  lastInteract: -999,
+  startT: 0,
+  critical: false,
+  heat: 0,            // 0..1.4 归一化温度，喂给 shader
+};
+
+/* 玩法数值：功率 / 温度 / 冷却剂 */
+const sim = {
+  target: 0.78,       // 玩家设定的目标功率
+  power: 0.78,        // 实际功率（跟随有惯性）
+  temp: 0.42,         // 0 = 冷，1.0 = 熔毁
+  coolant: 3,
+  coolT: 0,           // 注水剩余秒数
+  coolCd: 0,
+  spike: 0,           // 功率尖峰（石墨头正空泡）
+  shake: 0,
+  dead: false,
+};
+
+const el = {
+  state: document.getElementById('v-state'),
+  out:   document.getElementById('v-out'),
+  temp:  document.getElementById('v-temp'),
+  flux:  document.getElementById('v-flux'),
+  rods:  document.getElementById('v-rods'),
+  cool:  document.getElementById('v-cool'),
+  geom:  document.getElementById('v-geom'),
+  lamp:  document.getElementById('lamp'),
+  toast: document.getElementById('toast'),
+  tip:   document.getElementById('tip'),
+  help:  document.getElementById('help'),
+  hinthelp: document.getElementById('hinthelp'),
+};
+
+const cEl = {
+  track:    document.getElementById('track'),
+  fill:     document.getElementById('powerFill'),
+  knob:     document.getElementById('powerKnob'),
+  val:      document.getElementById('powerVal'),
+  tier:     document.getElementById('tierName'),
+  tempFill: document.getElementById('tempfill'),
+  tempVal:  document.getElementById('tempVal'),
+  coolDots: document.getElementById('coolDots'),
+  coolBtn:  document.getElementById('coolBtn'),
+  alarm:    document.getElementById('alarm'),
+  flash:    document.getElementById('flash'),
+};
+
+let toastTimer = 0;
+function toast(text, ms = 1600) {
+  el.toast.textContent = text;
+  el.toast.style.opacity = '1';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.toast.style.opacity = '0'; }, ms);
+}
+
+function setMode(m) {
+  state.mode = m;
+  el.state.textContent = m === 'online' ? '运行中'
+    : m === 'scramming' ? '停堆中'
+    : m === 'scrammed' ? '已停堆'
+    : m === 'exploded' ? '已熔毁'
+    : '启堆中';
+  el.state.className = 'v' + (
+    (m === 'scrammed' || m === 'scramming' || m === 'exploded') ? ' bad'
+    : m === 'starting' ? ' warn' : '');
+  el.lamp.className = (m === 'exploded' || m === 'scrammed' || m === 'scramming') ? 'scram'
+    : m === 'starting' ? 'busy' : '';
+}
+
+/* ═══════════════════════════ 控制面板 ═══════════════════════════ */
+function tierOf(pct) {
+  if (pct < 30) return ['低功率', 'rgba(140,220,255,.95)'];
+  if (pct < 70) return ['正常功率', 'rgba(170,230,255,.95)'];
+  if (pct < 92) return ['高功率', '#ffc46b'];
+  if (pct <= 101) return ['极限功率', '#ff8a9b'];
+  return ['超临界', '#ff4d63'];
+}
+
+function renderControl() {
+  const pct = sim.target * 100;
+  const pos = (sim.target / 1.10) * 100;
+  cEl.fill.style.width = pos + '%';
+  cEl.knob.style.left = pos + '%';
+  cEl.val.textContent = Math.round(pct) + '%';
+
+  const [name, color] = tierOf(pct);
+  cEl.tier.textContent = name;
+  cEl.tier.style.color = color;
+}
+
+function renderCool() {
+  let html = '';
+  for (let i = 0; i < 3; i++) {
+    html += i < sim.coolant ? '●' : '<i>●</i>';
+  }
+  cEl.coolDots.innerHTML = html;
+  cEl.coolBtn.classList.toggle('dead', sim.coolant <= 0 || sim.dead);
+}
+
+let draggingPower = false;
+
+function trackSet(e) {
+  const r = cEl.track.getBoundingClientRect();
+  const k = THREE.MathUtils.clamp((e.clientX - r.left) / r.width, 0, 1);
+  sim.target = k * 1.10;
+  renderControl();
+}
+
+cEl.track.addEventListener('pointerdown', (e) => {
+  if (sim.dead) return;
+  draggingPower = true;
+  cEl.track.setPointerCapture(e.pointerId);
+  trackSet(e);
+});
+cEl.track.addEventListener('pointermove', (e) => {
+  if (draggingPower) trackSet(e);
+});
+cEl.track.addEventListener('pointerup', () => { draggingPower = false; });
+cEl.track.addEventListener('pointercancel', () => { draggingPower = false; });
+
+function injectCoolant() {
+  if (sim.dead) { toast('堆芯已熔毁 · 按 R 重启', 2000); return; }
+  if (sim.coolant <= 0) { toast('冷却剂耗尽 · 等待补给', 2000); return; }
+  if (sim.coolT > 0) return;
+  sim.coolant--;
+  sim.coolT = 3.4;
+  sim.coolCd = 0;
+  renderCool();
+  kickHoses(0.075);                 // 水锤：软管被顶得抖一下
+  Sfx.play('alarm', 0.55, 1.75);    // 阀门一声
+  toast('冷却剂注入 · 堆芯温度快速下降', 2200);
+}
+cEl.coolBtn.addEventListener('click', injectCoolant);
+
+/* ═══════════════════════════ 爆炸 ═══════════════════════════ */
+function explode() {
+  if (sim.dead) return;
+  sim.dead = true;
+  sim.temp = 1.35;
+  sim.spike = 0;
+  sim.shake = 2.2;
+  shockT = 0;
+  kickHoses(0.55);                  // 冲击波把软管甩开
+  spawnDebris();                    // 碎屑飞散
+  fireT = 0;
+  fireball.visible = true;
+  fireball.position.set(0, 0.2, 0);
+  Sfx.play('explosion', 1.0, 0.92);
+
+  // 壳体碎裂消失，露出熔毁的堆芯
+  shell.visible = false;
+  membrane.visible = false;
+  scanRing.visible = false;
+
+  setMode('exploded');
+  cEl.alarm.classList.add('on');
+  cEl.alarm.style.opacity = '1';
+  renderCool();
+
+  // 全屏闪白，然后长淡出
+  cEl.flash.style.transition = 'none';
+  cEl.flash.style.opacity = '1';
+  requestAnimationFrame(() => {
+    cEl.flash.style.transition = 'opacity 1.6s ease-out';
+    cEl.flash.style.opacity = '0';
+  });
+
+  toast('堆芯熔毁 · 反应堆解体', 9000);
+}
+
+function restart() {
+  sim.dead = false;
+  sim.temp = 0.40;
+  sim.power = 0.55;
+  sim.target = 1.00;
+  sim.coolant = 3;
+  sim.coolT = 0;
+  sim.coolCd = 0;
+  sim.spike = 0;
+  sim.shake = 0;
+  state.heat = 0;
+
+  // 清掉碎屑，恢复结构
+  debris.count = 0;
+  debrisActive = false;
+  fireT = -1;
+  fireball.visible = false;
+  fireballMat.opacity = 0;
+  shell.visible = true;
+  membrane.visible = true;
+  scanRing.visible = true;
+
+  rods.forEach((r) => { r.target = 0; r.pos = 0; });
+  setMode('online');
+  cEl.alarm.classList.remove('on');
+  renderControl();
+  renderCool();
+  toast('反应堆重启 · 系统恢复', 2600);
+}
+
+/* ═══════════════════════════ 停堆 / 启堆 ═══════════════════════════ */
+const START_DURATION = 8.0;
+
+function scram() {
+  if (sim.dead) { toast('堆芯已熔毁 · 按 R 重启', 2000); return; }
+  if (state.mode === 'starting') return;
+
+  if (state.mode === 'scrammed' || state.mode === 'scramming') {
+    // —— 启堆 ——
+    setMode('starting');
+    state.startT = clock.getElapsedTime();
+    state.critical = false;
+    sim.target = Math.max(sim.target, 0.9);
+    renderControl();
+    toast('启堆序列开始 · 逐根抽出控制棒', 2400);
+
+    rods.forEach((r, i) => {
+      setTimeout(() => {
+        if (state.mode === 'starting') {
+          r.target = 0;
+          toast('控制棒 ' + String(i + 1).padStart(2, '0') + ' 抽出', 900);
+        }
+      }, 500 + i * 620);
+    });
+    return;
+  }
+
+  // —— 停堆 ——
+  // 切尔诺贝利时刻：高温 + 高功率时插棒，石墨头置换空泡 → 正反馈
+  const dangerous = sim.temp > 0.70 && sim.power > 0.78;
+
+  setMode('scramming');
+  rods.forEach((r, i) => setTimeout(() => { r.target = 1; }, i * 70));
+
+  if (dangerous) {
+    sim.spike = 1.1;
+    cEl.alarm.classList.add('on');
+    toast('危险 · 石墨头置换空泡 · 功率正反馈', 3600);
+    setTimeout(() => { if (!sim.dead) explode(); }, 1550);
+  } else {
+    toast('紧急停堆 · 控制棒全部插入', 2200);
+    setTimeout(() => { if (state.mode === 'scramming') setMode('scrammed'); }, 2400);
+  }
+}
+
+function pulse() {
+  if (sim.dead) return;
+  state.pulse = 1;
+  shockT = 0;
+  toast('中子脉冲');
+}
+
+/* ═══════════════════════════ 声音 ═══════════════════════════
+   素材来自 OpenGameArt（CC0 / CC-BY），下载在本地的 vendor/sfx/。
+   浏览器不允许自动播放，所以第一次点击或按键时才解锁 AudioContext。 */
+const Sfx = {
+  ctx: null,
+  master: null,
+  buffers: {},
+  nodes: {},
+  unlocked: false,
+  muted: false,
+  loading: false,
+
+  init() {
+    if (this.ctx) return Promise.resolve();
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return Promise.reject(new Error('no webaudio'));
+    this.ctx = new Ctx();
+
+    // 总线：增益 → 压缩器 → 输出。压缩器用来兜住爆炸那一下，防止削顶
+    this.master = this.ctx.createGain();
+    this.master.gain.value = 1.0;
+
+    this.comp = this.ctx.createDynamicsCompressor();
+    this.comp.threshold.value = -10;
+    this.comp.knee.value = 12;
+    this.comp.ratio.value = 6;
+    this.comp.attack.value = 0.003;
+    this.comp.release.value = 0.25;
+
+    this.master.connect(this.comp);
+    this.comp.connect(this.ctx.destination);
+
+    return this.load();
+  },
+
+  async load() {
+    const files = {
+      hum:       './vendor/sfx/hum.ogg',
+      alarm:     './vendor/sfx/alarm.ogg',
+      siren:     './vendor/sfx/siren.mp3',
+      explosion: './vendor/sfx/explosion.mp3',
+    };
+    const jobs = Object.entries(files).map(async ([k, url]) => {
+      const res = await fetch(url);
+      const buf = await res.arrayBuffer();
+      this.buffers[k] = await this.ctx.decodeAudioData(buf);
+    });
+    await Promise.all(jobs);
+  },
+
+  makeLoop(key, rate) {
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.buffers[key];
+    src.loop = true;
+    src.playbackRate.value = rate;
+    const g = this.ctx.createGain();
+    g.gain.value = 0;
+    src.connect(g);
+    g.connect(this.master);
+    src.start();
+    return { src, gain: g };
+  },
+
+  play(key, vol = 1, rate = 1) {
+    if (!this.ctx || !this.buffers[key] || this.muted) return;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.buffers[key];
+    src.playbackRate.value = rate;
+    const g = this.ctx.createGain();
+    g.gain.value = vol;
+    src.connect(g);
+    g.connect(this.master);
+    src.start();
+  },
+
+  fade(node, v, tc = 0.25) {
+    if (!node || !this.ctx) return;
+    node.gain.gain.setTargetAtTime(this.muted ? 0 : v, this.ctx.currentTime, tc);
+  },
+};
+
+function unlockAudio() {
+  if (Sfx.unlocked) return;
+  Sfx.unlocked = true;
+  Sfx.init().then(() => {
+    Sfx.nodes.hum   = Sfx.makeLoop('hum', 0.85);
+    Sfx.nodes.alarm = Sfx.makeLoop('alarm', 1.0);
+    Sfx.nodes.siren = Sfx.makeLoop('siren', 1.0);
+    Sfx.fade(Sfx.nodes.hum, 0.55, 1.2);  }).catch(() => {});
+}
+window.addEventListener('pointerdown', unlockAudio, { once: true });
+window.addEventListener('keydown', unlockAudio, { once: true });
+
+
+/* ═══════════════════════════ 交互 ═══════════════════════════ */
+let yaw = 0, pitch = 0.30, dist = 16.0;
+let yawV = 0, pitchV = 0;
+let dragging = false;
+let downX = 0, downY = 0, downBtn = -1;
+const PITCH_MIN = -0.22, PITCH_MAX = 1.16;
+
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+const pickables = [core, ...rods.map((r) => r.holder.children[0])];
+let hovered = null;
+
+function updateNDC(e) {
+  ndc.x = (e.clientX / W()) * 2 - 1;
+  ndc.y = -(e.clientY / H()) * 2 + 1;
+}
+
+function pick(e) {
+  updateNDC(e);
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObjects(pickables, false);
+  return hits.length ? hits[0].object : null;
+}
+
+function setHover(obj) {
+  if (hovered === obj) return;
+  if (hovered) {
+    if (hovered.userData.pick === 'rod' && hovered.material) {
+      hovered.material.emissive.setHex(0x04090f);
+    }
+  }
+  hovered = obj;
+  if (hovered) {
+    if (hovered.userData.pick === 'rod' && hovered.material) {
+      hovered.material.emissive.setHex(0x1d4a70);
+    }
+    canvas.classList.add('hot');
+
+    if (obj.userData.pick === 'core') {
+      el.tip.innerHTML = '<b>堆芯</b> · ' + (state.power * 100).toFixed(1) + ' % · 点击触发脉冲';
+    } else if (obj.userData.pick === 'rod') {
+      const r = rods[obj.userData.index];
+      el.tip.innerHTML = '<b>控制棒 ' + String(obj.userData.index + 1).padStart(2, '0')
+        + '</b> · ' + (r.pos > 0.5 ? '已插入' : '已抽出') + ' · 点击切换';
+    }
+    el.tip.style.opacity = '1';
+  } else {
+    canvas.classList.remove('hot');
+    el.tip.style.opacity = '0';
+  }
+}
+
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+canvas.addEventListener('pointerdown', (e) => {
+  downX = e.clientX; downY = e.clientY; downBtn = e.button;
+  if (e.button === 2) {
+    dragging = true;
+    canvas.classList.add('dragging');
+    canvas.setPointerCapture(e.pointerId);
+  }
+});
+
+window.addEventListener('pointermove', (e) => {
+  if (draggingPower) return;                 // 正在拖功率条，别去算 hover
+  // 只有右键按住时才转视角；裸移鼠标只做 hover
+  if (dragging) {
+    const dx = e.clientX - downX;
+    const dy = e.clientY - downY;
+    downX = e.clientX;
+    downY = e.clientY;
+
+    // 直接改角度，不累加进速度——否则每帧叠加会把位移放大十倍
+    yaw   += dx * 0.0042;
+    pitch += dy * 0.0030;
+    pitch  = THREE.MathUtils.clamp(pitch, PITCH_MIN, PITCH_MAX);
+
+    // 只留一点残余，松手后滑行一小段
+    yawV   = dx * 0.0007;
+    pitchV = dy * 0.0005;
+
+    state.lastInteract = clock.getElapsedTime();
+  } else {
+    setHover(pick(e));
+    el.tip.style.transform = 'translate(' + (e.clientX + 16) + 'px,' + (e.clientY + 16) + 'px)';
+  }
+});
+
+window.addEventListener('pointerup', (e) => {
+  const moved = Math.hypot(e.clientX - downX, e.clientY - downY);
+
+  if (e.button === 2) {
+    dragging = false;
+    canvas.classList.remove('dragging');
+    state.lastInteract = clock.getElapsedTime();
+  }
+
+  // 左键点击（位移很小才算点击，避免拖动误触）
+  if (e.button === 0 && downBtn === 0 && moved < 6) {
+    if (sim.dead) {
+      toast('堆芯已熔毁 · 按 R 重启', 1800);   // 熔毁后一切操作失效
+    } else {
+      const obj = pick(e);
+      if (obj) {
+        if (obj.userData.pick === 'core') {
+          pulse();
+        } else if (obj.userData.pick === 'rod') {
+          const r = rods[obj.userData.index];
+          r.target = r.target > 0.5 ? 0 : 1;
+          toast(r.target > 0.5
+            ? '控制棒 ' + String(obj.userData.index + 1).padStart(2, '0') + ' 插入'
+            : '控制棒 ' + String(obj.userData.index + 1).padStart(2, '0') + ' 抽出');
+        }
+      }
+    }
+    state.lastInteract = clock.getElapsedTime();
+  }
+  downBtn = -1;
+});
+
+window.addEventListener('wheel', (e) => {
+  dist = THREE.MathUtils.clamp(dist + e.deltaY * 0.006, 5.2, 18.5);
+  state.lastInteract = clock.getElapsedTime();
+}, { passive: true });
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') {
+    e.preventDefault();
+    scram();
+  } else if (e.key === 'r' || e.key === 'R') {
+    if (sim.dead) { restart(); return; }
+    yaw = 0; pitch = 0.30; dist = 16.0; yawV = 0; pitchV = 0;
+    toast('视角已重置');
+  } else if (e.key === 'c' || e.key === 'C') {
+    injectCoolant();
+  } else if (e.key === 'h' || e.key === 'H') {
+    el.help.classList.toggle('on');
+    el.hinthelp.style.opacity = '0';
+  } else if (e.key === 'm' || e.key === 'M') {
+    Sfx.muted = !Sfx.muted;
+    if (Sfx.master) Sfx.master.gain.value = Sfx.muted ? 0 : 0.6;
+    toast(Sfx.muted ? '已静音' : '声音已开启');
+  }
+});
+
+/* 首次进入给一个提示，8 秒后自己消失 */
+setTimeout(() => { el.hinthelp.style.opacity = '1'; }, 1000);
+setTimeout(() => { el.hinthelp.style.opacity = '0'; }, 9000);
+
+window.addEventListener('resize', () => {
+  const w = W(), h = H();
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(w, h);
+  composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  composer.setSize(w, h);
+  bloom.setSize(w, h);
+  fxPass.uniforms.uRes.value.set(w, h);
+});
+
+/* ═══════════════════════════ 主循环 ═══════════════════════════ */
+let hudT = 0;
+let screenT = -1;
+let fluxShown = 2.09;
+let coolShown = 4.2;
+let frames = 0, fpsT = performance.now(), fpsVal = 0;
+
+function tick() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t  = clock.getElapsedTime();
+
+  /* —— 相机：只受右键拖拽影响，另外在长时间无交互后极慢自转 —— */
+  if (!dragging && t - state.lastInteract > 3.0) {
+    yaw += dt * 0.020;
+  }
+
+  yaw += yawV;
+  pitch += pitchV;
+  yawV *= 0.90;
+  pitchV *= 0.90;
+  pitch = THREE.MathUtils.clamp(pitch, PITCH_MIN, PITCH_MAX);
+
+  const yy = Math.sin(pitch) * dist;
+  const rr = Math.cos(pitch) * dist;
+  camera.position.set(Math.sin(yaw) * rr, yy, Math.cos(yaw) * rr);
+  camera.lookAt(0, 0.15, 0);
+
+  /* —— 震动：脉冲 + 熔毁 —— */
+  sim.shake *= Math.pow(0.14, dt);
+  const shakeAmt = state.pulse * state.pulse * 0.075 + Math.min(sim.shake, 2.2) * 0.16;
+  if (shakeAmt > 0.0015) {
+    camera.position.x += (Math.random() - 0.5) * shakeAmt;
+    camera.position.y += (Math.random() - 0.5) * shakeAmt;
+    camera.position.z += (Math.random() - 0.5) * shakeAmt * 0.5;
+    camera.lookAt(0, 0.15, 0);
+  }
+
+  /* —— 反应堆物理 —— */
+  if (sim.dead) {
+    sim.power += (0.02 - sim.power) * (1 - Math.pow(0.25, dt));
+    sim.temp = Math.min(sim.temp + dt * 0.015, 1.4);
+  } else if (state.mode === 'starting') {
+    const k = Math.min((t - state.startT) / START_DURATION, 1);
+    sim.target = 0.06 + 0.94 * Math.pow(k, 2.4);
+    sim.power += (sim.target - sim.power) * (1 - Math.pow(0.25, dt));
+    if (!state.critical && k > 0.58) {
+      state.critical = true;
+      state.pulse = 1;
+      shockT = 0;
+      toast('堆芯临界 · 功率快速爬升', 2800);
+    }
+    if (k >= 1) {
+      setMode('online');
+      renderControl();
+      toast('功率稳定 · 100 %', 2400);
+    }
+  } else {
+    const tgt = (state.mode === 'scrammed' || state.mode === 'scramming') ? 0 : sim.target;
+    sim.power += (tgt - sim.power) * (1 - Math.pow(0.12, dt));
+  }
+
+  // 功率尖峰（石墨头正空泡）—— 只往上冲，压不住
+  if (sim.spike > 0) {
+    sim.power += sim.spike * 1.7 * dt;
+    sim.spike = Math.max(0, sim.spike - dt * 0.55);
+  }
+
+  // 温度：产热随功率爬升，散热随温度差变大（自然找平衡点）
+  if (!sim.dead) {
+    let heatIn = sim.power * (0.35 + sim.power * 0.20);
+    if (sim.power > 1.0) heatIn += (sim.power - 1.0) * 1.6;   // 超功率额外发热
+    const rodCool = (state.rodsIn / ROD_N) * 0.10;
+    const coolOut = 0.09 + sim.temp * 0.60 + rodCool + (sim.coolT > 0 ? 0.55 : 0);
+    sim.temp = THREE.MathUtils.clamp(sim.temp + (heatIn - coolOut) * dt, 0, 1.5);
+    if (sim.temp >= 1.0) explode();
+  }
+
+  // 冷却剂补给
+  if (sim.coolT > 0) {
+    sim.coolT -= dt;
+    if (sim.coolT <= 0) { sim.coolT = 0; sim.coolCd = 0; }
+  } else if (sim.coolant < 3 && !sim.dead) {
+    sim.coolCd += dt;
+    if (sim.coolCd > 11) { sim.coolCd = 0; sim.coolant++; renderCool(); }
+  }
+
+  state.power = sim.power;
+  state.heat = sim.temp;
+
+  const power = Math.min(state.power, 1.35);
+  const pulseBoost = state.pulse > 0 ? state.pulse : 0;
+  state.pulse = Math.max(0, state.pulse - dt * 1.6);
+
+  /* —— 控制棒 —— */
+  let rodsIn = 0;
+  for (const r of rods) {
+    r.pos += (r.target - r.pos) * (1 - Math.pow(0.0015, dt));
+    r.holder.position.y = r.base - r.pos * 0.95;
+    r.tipMat.opacity = (0.18 + 0.42 * (1 - r.pos)) * (0.25 + power * 0.9);
+    rodsIn += r.pos;
+  }
+  for (const c of cables) updateCable(c, false);
+  state.rodsIn = rodsIn;
+
+  /* —— 核心 —— */
+  const pulse = 1 + Math.sin(t * 1.15) * 0.022 + Math.sin(t * 2.63 + 1.1) * 0.011;
+  const p2 = power * (1 + pulseBoost * 0.6);
+
+  core.scale.setScalar(pulse * (1 + pulseBoost * 0.05));
+  membrane.scale.setScalar(pulse * 1.005);
+  coreMat.uniforms.uTime.value = t;
+  coreMat.uniforms.uPower.value = sim.dead ? (0.20 + state.heat * 0.24) : 0.15 + p2;
+  coreMat.uniforms.uHeat.value = state.heat;
+  membraneMat.uniforms.uTime.value = t;
+  membraneMat.uniforms.uPower.value = sim.dead ? 0.05 : 0.15 + p2;
+
+  // 高温时核心、光晕一起偏橙
+  const heatTint = THREE.MathUtils.clamp((state.heat - 0.55) * 2.6, 0, 1);
+  heartMat.color.setRGB(1, 1 - heatTint * 0.42, 1 - heatTint * 0.70);
+  haloMat.color.setRGB(1, 1 - heatTint * 0.30, 1 - heatTint * 0.55);
+
+  heart.scale.setScalar(2.45 * (1 + Math.sin(t * 2.63 + 1.1) * 0.04) * (0.70 + p2 * 0.40 + pulseBoost * 0.25));
+  heartMat.opacity = (0.34 + Math.sin(t * 1.15) * 0.06) * (0.30 + p2 * 0.80);
+  spark.scale.setScalar(1.70 * (1 + Math.sin(t * 3.7 + 0.4) * 0.07) * (0.55 + p2 * 0.60) * (1 + pulseBoost * 0.8));
+  sparkMat.opacity = (0.34 + Math.sin(t * 2.2) * 0.06) * (0.25 + p2 * 0.80);
+
+  coreLight.intensity = 155 * (0.08 + p2 * 1.0) * pulse;
+  underLight.intensity = (32 + Math.sin(t * 0.9) * 6) * (0.15 + p2 * 0.9);
+
+  /* —— 外壳扫描 —— */
+  shellMat.uniforms.uTime.value = t;
+  shellMat.uniforms.uPower.value = 0.25 + p2 * 0.9;
+  const sc = ((t * 0.16) % 1.6) - 0.8;
+  shellMat.uniforms.uScan.value = sc;
+
+  /* —— 实体扫描环：贴着球面上下走 —— */
+  const yNorm = (t * 0.30) % 2 - 1;               // -1..1
+  const absY = Math.abs(yNorm);
+  const ringR = Math.sqrt(Math.max(SHELL_R * SHELL_R - (yNorm * SHELL_R) ** 2, 0.01));
+  scanRing.position.y = yNorm * SHELL_R;
+  scanRing.scale.set(ringR, ringR, 1);
+  scanRing.material.opacity = (0.10 + Math.pow(Math.sin(absY * Math.PI), 2.4) * 0.55) * (0.35 + p2 * 0.9);
+
+  /* —— 冲击波 —— */
+  if (shockT >= 0) {
+    shockT += dt * 1.5;
+    if (shockT > 1) {
+      shockT = -1;
+      shockMat.opacity = 0;
+    } else {
+      const s = 1 + shockT * 7.5;
+      shock.scale.set(s, s, 1);
+      shockMat.opacity = (1 - shockT) ** 1.6 * 0.55;
+      shock.position.y = -3.5 + shockT * 0.9;
+    }
+  }
+
+  /* —— 粒子 —— */
+  cloudMat.uniforms.uTime.value = t;
+  cloudMat.uniforms.uPower.value = 0.15 + p2;
+  chMat.uniforms.uTime.value = t;
+  chMat.uniforms.uPower.value = 0.15 + p2;
+  cherenkov.rotation.y = t * 0.045;
+  cherenkov.rotation.x = Math.sin(t * 0.11) * 0.12;
+
+  /* —— 结构微动 —— */
+  rig.rotation.y = Math.sin(t * 0.06) * 0.03;
+  for (const r of rods) {
+    r.holder.rotation.y = Math.sin(t * 0.5 + r.phase) * 0.15;
+  }
+
+  /* —— 软管：Verlet 求解 + 重建几何 —— */
+  for (const h of hoses) stepHose(h, dt, t);
+
+  /* —— 碎屑与火球 —— */
+  updateDebris(dt);
+  if (fireT >= 0) {
+    fireT += dt * 0.9;
+    if (fireT >= 1) {
+      fireT = -1;
+      fireball.visible = false;
+      fireballMat.opacity = 0;
+    } else {
+      fireball.scale.setScalar(2.2 + fireT * 17);
+      fireballMat.opacity = Math.pow(1 - fireT, 1.5);
+    }
+  }
+
+  /* —— 地面 / 星空 / 光晕 —— */
+  gridMat.uniforms.uTime.value = t;
+  halo.scale.setScalar((10.5 + Math.sin(t * 0.8) * 0.4) * (0.55 + p2 * 0.5));
+  haloMat.opacity = (0.24 + Math.sin(t * 1.15) * 0.05) * (0.25 + p2 * 0.85);
+  starsMat.uniforms.uTime.value = t;
+  stars.rotation.y = t * 0.004;
+  domeMat.uniforms.uTime.value = t;
+
+  /* —— 体积光柱 / 浮尘 / 倒影 —— */
+  shaftMat.uniforms.uTime.value = t;
+  shaftMat.uniforms.uPower.value = 0.25 + p2 * 0.95;
+  dustMat.uniforms.uTime.value = t;
+  dustMat.uniforms.uPower.value = 0.25 + p2 * 0.95;
+
+  const reflPulse = 1 + Math.sin(t * 1.15) * 0.05;
+  reflMat.opacity = (0.20 + Math.sin(t * 1.3) * 0.03) * (0.28 + p2 * 0.85);
+  refl.scale.set(4.6 * reflPulse, 1.55 * reflPulse, 1);
+
+  /* —— 悬浮屏（8Hz 重画就够，canvas 上传是有成本的） —— */
+  if (t - screenT > 0.12) {
+    screenT = t;
+    drawScreen(screens[0], t, p2);
+    drawScreen(screens[1], t + 3.1, p2);
+  }
+
+  /* —— 声音随工况走 —— */
+  if (Sfx.ctx) {
+    Sfx.fade(Sfx.nodes.hum, sim.dead ? 0.05 : (0.42 + sim.power * 0.48), 0.45);
+    Sfx.fade(Sfx.nodes.alarm, sim.dead ? 0 : (sim.temp > 0.80 ? 0.62 : 0), 0.30);
+    Sfx.fade(Sfx.nodes.siren, sim.dead ? 0.70 : 0, 0.80);
+  }
+
+  /* —— 后处理 —— */
+  const heatGlow = Math.max(0, state.heat - 0.6) * 0.8;
+  bloom.strength = 0.30 + 0.45 * (0.25 + p2 * 0.85) + heatGlow * 0.5;
+  bloom.threshold = Math.max(0.40, 0.74 - Math.max(0, state.heat - 0.65) * 0.45);
+  fxPass.uniforms.uTime.value = t;
+  fxPass.uniforms.uAberration.value = 0.0022 + Math.max(0, state.heat - 0.6) * 0.010;
+
+  /* —— HUD（10Hz 足够，别每帧动 DOM） —— */
+  if (t - hudT > 0.1) {
+    hudT = t;
+    const outPct = Math.max(0, sim.power * 100 + Math.sin(t * 3.1) * 0.5);
+    el.out.textContent = outPct.toFixed(1) + ' %';
+    el.out.className = 'v' + (outPct < 40 ? ' bad' : outPct < 85 ? ' warn' : '');
+
+    const tempK = Math.round(320 + sim.temp * 3300);
+    el.temp.textContent = tempK + ' K';
+    el.temp.className = 'v' + (sim.temp > 0.82 ? ' bad' : sim.temp > 0.62 ? ' warn' : '');
+
+    // 控制面板
+    cEl.tempFill.style.width = Math.min(sim.temp, 1) * 100 + '%';
+    cEl.tempFill.className = sim.temp > 0.82 ? 'bad' : sim.temp > 0.62 ? 'warn' : '';
+    cEl.tempVal.textContent = Math.round(Math.min(sim.temp, 1) * 100) + '%';
+    cEl.alarm.classList.toggle('on', !sim.dead && sim.temp > 0.80);
+
+    fluxShown += ((0.4 + outPct * 0.024 + Math.sin(t * 1.7) * 0.12) - fluxShown) * 0.25;
+    el.flux.textContent = fluxShown.toFixed(2) + 'e14';
+
+    el.rods.textContent = state.rodsIn.toFixed(1) + ' / ' + ROD_N + ' 插入';
+
+    coolShown += ((0.6 + (1 - state.rodsIn / ROD_N) * 4.2 + Math.sin(t * 0.7) * 0.15) - coolShown) * 0.2;
+    el.cool.textContent = coolShown.toFixed(1) + ' m/s';
+
+    el.geom.textContent = fpsVal.toFixed(0) + ' fps';
+
+    frames++;
+    const now = performance.now();
+    if (now - fpsT > 500) {
+      fpsVal = (frames * 1000) / (now - fpsT);
+      frames = 0; fpsT = now;
+    }
+  }
+
+  composer.render();
+}
+
+renderer.setAnimationLoop(tick);
+renderControl();
+renderCool();
+
+/* —— 供自动化测试读取的真实相机状态 —— */
+window.__cam = () => ({ yaw, pitch, dist, dragging, hovered: hovered ? hovered.userData.pick : null });
+window.__sim = sim;
+window.__state = state;
+window.__hoses = hoses;
+
+/* —— 调试：?hide=halo,floor 逐个关掉可疑对象 —— */
+{
+  const q = new URLSearchParams(location.search).get('hide');
+  if (q) {
+    const map = { halo, heart, spark, scanRing, shock, floor, grid, core, shell, membrane, cloud, cherenkov, stars, dome };
+    q.split(',').forEach((k) => { if (map[k]) map[k].visible = false; });
+  }
+}
+</script>
+</body>
+</html>
