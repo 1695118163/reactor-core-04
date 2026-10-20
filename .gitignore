@@ -1,0 +1,6 @@
+﻿# 本地临时产物
+*.tmp
+node_modules/
+
+# 存档版本不需要发布
+index-v1.html
